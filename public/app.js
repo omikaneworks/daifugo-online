@@ -35,6 +35,20 @@ const state = {
 };
 localStorage.setItem("daifugo-pid", state.playerId);
 
+// 開発者モード：?dev=1 を付けてアクセスした端末だけテスト機能が見える。
+// 一度アクセスすればその端末に記憶される（?dev=0 で解除）。
+// 友達に渡す通常URLでは何も表示されない。
+const devParam = new URLSearchParams(location.search).get("dev");
+if (devParam === "1") localStorage.setItem("daifugo-dev", "1");
+else if (devParam === "0") localStorage.removeItem("daifugo-dev");
+const IS_DEV = localStorage.getItem("daifugo-dev") === "1";
+
+// ダミー席がある部屋は必ずテストモード（誰も自動で着手しないため）
+function effTestMode() {
+  const r = state.room;
+  return state.testMode || !!(r && r.players.some((p) => p.isDummy));
+}
+
 // ---------- 通信 ----------
 function send(obj) {
   const r = state.room;
@@ -89,9 +103,11 @@ W.joinRoom = () => {
   localStorage.setItem("daifugo-name", state.name);
   connect(code, { type: "join", playerId: state.playerId, name: state.name });
 };
-W.startGame = () => send({ type: "start", testMode: state.testMode, asPlayerId: null });
+W.startGame = () => send({ type: "start", testMode: effTestMode(), asPlayerId: null });
 W.addCPU = () => send({ type: "addCPU", asPlayerId: null });
 W.removeCPU = () => send({ type: "removeCPU", asPlayerId: null });
+W.addDummy = () => send({ type: "addDummy", asPlayerId: null });
+W.removeDummy = () => send({ type: "removeDummy", asPlayerId: null });
 W.rematch = () => send({ type: "rematch", asPlayerId: null });
 W.toggleTestMode = () => { state.testMode = !state.testMode; render(); };
 W.toggleRulesPanel = () => { state.showRules = !state.showRules; render(); };
@@ -240,6 +256,9 @@ function render() {
   const me = r.players.find((p) => p.id === state.playerId);
 
   if (state.screen === "lobby") {
+    const hasDummy = r.players.some((p) => p.isDummy);
+    const testOn = effTestMode();
+    const minPlayers = testOn ? 2 : 3;
     app.innerHTML = `<div class="min-h-screen p-4"><div class="max-w-sm mx-auto">
       <div class="flex justify-end mb-2">${nightBtn()}</div>
       <h2 class="t-accent text-center text-sm mb-1">部屋コード</h2>
@@ -248,8 +267,9 @@ function render() {
       <div class="panel rounded-xl p-4 mb-3">
         <p class="t-dim text-sm mb-2">参加者（${r.players.length}/6）</p>
         <ul class="space-y-1">${r.players.map((p) => `<li class="flex items-center gap-2 t-main text-sm">
-          <span class="dot ${p.isCPU ? "dot-cpu" : "dot-human"}"></span>${esc(p.name)}
+          <span class="dot ${p.isCPU ? "dot-cpu" : p.isDummy ? "dot-dummy" : "dot-human"}"></span>${esc(p.name)}
           ${p.isCPU ? '<span class="tag-cpu">CPU</span>' : ""}
+          ${p.isDummy ? '<span class="tag-dummy">手動</span>' : ""}
           ${p.id === r.hostId ? '<span class="t-accent text-xs">ホスト</span>' : ""}
           ${p.id === state.playerId ? '<span class="t-dim text-xs">あなた</span>' : ""}
           ${r.classes && r.classes[p.id] ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${badgeColor(r.classes[p.id])}">${r.classes[p.id]}</span>` : ""}
@@ -258,14 +278,23 @@ function render() {
       ${isHost ? `<div class="flex gap-2 mb-2">
         <button onclick="addCPU()" ${r.players.length >= 6 ? "disabled" : ""} class="btn-sub flex-1 py-2 rounded-lg text-sm font-bold">CPUを追加</button>
         <button onclick="removeCPU()" ${!r.players.some((p) => p.isCPU) ? "disabled" : ""} class="btn-sub flex-1 py-2 rounded-lg text-sm font-bold">CPUを削除</button>
-      </div>
-      <button onclick="toggleTestMode()" class="btn-sub w-full py-2 mb-2 rounded-lg text-sm flex justify-between px-4">
-        <span>テストモード</span><span class="${state.testMode ? "err font-bold" : "t-dim"} text-xs">${state.testMode ? "ON（全員の手札が見える）" : "OFF"}</span></button>` : ""}
+      </div>` : ""}
+      ${isHost && IS_DEV ? `<div class="devbox">
+        <p class="dev-t">開発者メニュー</p>
+        <button onclick="toggleTestMode()" ${hasDummy ? "disabled" : ""} class="btn-sub w-full py-2 mb-2 rounded-lg text-sm flex justify-between px-4">
+          <span>テストモード</span><span class="${testOn ? "err font-bold" : "t-dim"} text-xs">${
+            hasDummy ? "ON（ダミー席のため自動）" : testOn ? "ON（全員の手札が見える）" : "OFF"}</span></button>
+        <div class="flex gap-2">
+          <button onclick="addDummy()" ${r.players.length >= 6 ? "disabled" : ""} class="btn-sub flex-1 py-2 rounded-lg text-sm font-bold">ダミー席を追加</button>
+          <button onclick="removeDummy()" ${!hasDummy ? "disabled" : ""} class="btn-sub flex-1 py-2 rounded-lg text-sm font-bold">ダミー席を削除</button>
+        </div>
+        <p class="dev-note">ダミー席は自動で着手しません。全員分を自分で操作できます。</p>
+      </div>` : ""}
       <button onclick="toggleRulesPanel()" class="btn-sub w-full py-2 mb-2 rounded-lg text-sm flex justify-between px-4">
         <span>ルール設定を${state.showRules ? "隠す" : "表示"}</span><span class="t-dim text-xs">${rulesSummary(r.rules)}</span></button>
       ${state.showRules ? rulesPanel(isHost) : ""}
-      ${isHost ? `<button onclick="startGame()" ${r.players.length < (state.testMode ? 2 : 3) ? "disabled" : ""} class="btn-play w-full py-3 rounded-lg font-bold">
-        ${r.players.length < (state.testMode ? 2 : 3) ? `${state.testMode ? 2 : 3}人以上で開始できます` : state.testMode ? "テストモードで開始" : "ゲーム開始"}</button>`
+      ${isHost ? `<button onclick="startGame()" ${r.players.length < minPlayers ? "disabled" : ""} class="btn-play w-full py-3 rounded-lg font-bold">
+        ${r.players.length < minPlayers ? `${minPlayers}人以上で開始できます` : testOn ? "テストモードで開始" : "ゲーム開始"}</button>`
       : `<p class="t-dim text-center">ホストの開始を待っています…</p>`}
       ${state.error ? `<p class="err mt-3 text-center text-sm">${esc(state.error)}</p>` : ""}
     </div></div>`;
@@ -279,7 +308,9 @@ function render() {
     const act = r.players.find((p) => p.id === actId) || me;
     const canAct = isTest ? !act.isCPU : actId === state.playerId;
     const hand = sortHand((isTest ? act.hand : me.hand) || [], rev);
-    const others = r.players.filter((p) => p.id !== state.playerId);
+    // 席順はシャッフルされるので、参加順ではなく手番が回る順（r.order）で並べる
+    const seatOf = (id) => { const i = r.order.indexOf(id); return i < 0 ? 99 : i; };
+    const others = r.players.filter((p) => p.id !== state.playerId).sort((a, b) => seatOf(a.id) - seatOf(b.id));
 
     // 交換フェーズ
     if (r.status === "exchange") {
@@ -331,7 +362,7 @@ function render() {
         </span>
       </div>
       <div class="players">${others.map((p) => `<div class="pcard ${r.order[r.currentTurnIndex] === p.id ? "turn" : ""}">
-        <div class="pname">${esc(p.name)}${p.isCPU ? '<span class="tag-cpu">CPU</span>' : ""}</div>
+        <div class="pname">${esc(p.name)}${p.isCPU ? '<span class="tag-cpu">CPU</span>' : ""}${p.isDummy ? '<span class="tag-dummy">手動</span>' : ""}</div>
         <div class="t-dim text-xs">${p.finished ? "あがり" : `残${p.handCount}枚`}</div>
         ${isTest && p.hand ? `<div class="mini-row">${miniHand(p.hand, rev)}</div>` : ""}
       </div>`).join("")}</div>
@@ -346,8 +377,8 @@ function render() {
         <div class="hand-row">${hand.map((c) => cardFace(c, state.selected.some((s) => s.id === c.id), true, false)).join("")}</div>
         ${state.error ? `<p class="err text-xs mb-2 text-center">${esc(state.error)}</p>` : ""}
         ${r.pending ? "" : `<div class="flex gap-2">
-          <button onclick="submitPass()" ${!canAct || !r.field ? "disabled" : ""} class="btn-pass rounded-lg font-bold text-xs" style="flex:1 1 0%">パス</button>
-          <button onclick="submitPlay()" ${!canAct ? "disabled" : ""} class="btn-play rounded-lg font-bold" style="flex:9 1 0%">出す</button>
+          <button onclick="submitPass()" ${!canAct || !r.field ? "disabled" : ""} class="btn-pass rounded-lg font-bold" style="flex:3 1 0%">パス</button>
+          <button onclick="submitPlay()" ${!canAct ? "disabled" : ""} class="btn-play rounded-lg font-bold" style="flex:7 1 0%">出す</button>
         </div>`}
       </div></div>`;
     return;

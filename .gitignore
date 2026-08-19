@@ -1,0 +1,14 @@
+# wrangler のローカル状態（Durable Objects のローカルDB・ビルド一時ファイル）
+.wrangler/
+
+# 依存パッケージ
+node_modules/
+
+# 秘匿情報
+.env
+.env.*
+.dev.vars
+
+# OS / エディタ
+.DS_Store
+Thumbs.db

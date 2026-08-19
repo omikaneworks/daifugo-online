@@ -7,6 +7,8 @@ const RANKS = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]; // 15=2, 14=A
 const JOKER_RANK = 16;
 const RANK_LABEL = (r) => ({ 11: "J", 12: "Q", 13: "K", 14: "A", 15: "2", 16: "Joker" }[r] || String(r));
 const IS_RED = (s) => s === "H" || s === "D";
+// rules.startCard の「◯3を持つ人」指定と、そのスートの対応
+const START_SUIT = { diamond3: "D", spade3: "S", heart3: "H", club3: "C" };
 
 const DEFAULT_RULES = buildDefaultRules();
 
@@ -114,11 +116,11 @@ export class DaifugoRoom {
       this.room = {
         code: msg.code, status: "waiting", hostId: playerId, testMode: false,
         players: [{ id: playerId, name: msg.name, hand: [], handCount: 0, finished: false, finishOrder: null }],
-        order: [], field: null, direction: 1,
+        order: [], seatOrder: null, field: null, direction: 1,
         suitLockActive: null, colorLockActive: null, numberLockActive: null,
         suitRunSuit: null, suitRunCount: 0,
         lastPlayerId: null, currentTurnIndex: 0, passStreak: 0, passedPlayers: [],
-        revolution: false, tempReverse: false, revolutionLocked: false,
+        revolution: false, tempReverse: false, revolutionLocked: false, foulSeq: 0,
         pending: null, adv: null, discardPile: [],
         rules: JSON.parse(JSON.stringify(DEFAULT_RULES)),
         classes: null, previousDaifugoId: null, demotedPlayerId: null,
@@ -173,10 +175,30 @@ export class DaifugoRoom {
       return;
     }
 
+    // ダミー席：自動着手しない空席。テストモードでホストが全員分を手動操作するためのもの
+    if (type === "addDummy") {
+      if (playerId !== r.hostId || r.status !== "waiting") return;
+      if (r.players.length >= 6) { ws.send(JSON.stringify({ type: "error", message: "満員です" })); return; }
+      const n = r.players.filter((p) => p.isDummy).length + 1;
+      r.players.push({ id: `dummy-${n}-${Date.now()}`, name: `ダミー ${n}`, isDummy: true, hand: [], handCount: 0, finished: false, finishOrder: null });
+      r.log.push(`ダミー ${n} を追加しました`);
+      await this.persistAndBroadcast();
+      return;
+    }
+
+    if (type === "removeDummy") {
+      if (playerId !== r.hostId || r.status !== "waiting") return;
+      for (let i = r.players.length - 1; i >= 0; i--) if (r.players[i].isDummy) { r.players.splice(i, 1); break; }
+      await this.persistAndBroadcast();
+      return;
+    }
+
     if (type === "start") {
-      const min = msg.testMode ? 2 : 3;
+      // ダミー席は誰も自動で着手しないので、あるときは必ずテストモードで動かす
+      const testMode = !!msg.testMode || r.players.some((p) => p.isDummy);
+      const min = testMode ? 2 : 3;
       if (r.players.length < min) { ws.send(JSON.stringify({ type: "error", message: `${min}人以上必要です` })); return; }
-      r.testMode = !!msg.testMode;
+      r.testMode = testMode;
       this.dealAndStart();
       await this.persistAndBroadcast();
       await this.maybeScheduleCPU();
@@ -221,7 +243,8 @@ export class DaifugoRoom {
 
     if (type === "rematch") {
       r.status = "waiting";
-      r.testMode = false;
+      // ダミー席が残っている間はテストモードを維持する（開発中の連戦用）
+      r.testMode = r.players.some((p) => p.isDummy);
       r.players = r.players.map((p) => ({ ...p, hand: [], handCount: 0, finished: false, finishOrder: null }));
       this.clearField(r);
       r.pending = null; r.adv = null; r.discardPile = [];
@@ -232,18 +255,33 @@ export class DaifugoRoom {
   }
 
   // ---------- 配札・開始 ----------
+  // 席順（手番が回る並び）を決める。
+  // "first"（初回のみ）は前回の並びを引き継ぎ、後から入った人だけ後ろに足す。
+  buildSeatOrder() {
+    const r = this.room;
+    const ids = r.players.map((p) => p.id);
+    if (r.rules.seatShuffle === "first" && Array.isArray(r.seatOrder) && r.seatOrder.length) {
+      const kept = r.seatOrder.filter((id) => ids.includes(id));
+      const added = shuffle(ids.filter((id) => !kept.includes(id)));
+      return [...kept, ...added];
+    }
+    return shuffle(ids);
+  }
+
   dealAndStart() {
     const r = this.room;
     const rules = r.rules;
     const deck = shuffle(buildDeck(rules.jokerCount));
-    const order = r.players.map((p) => p.id);
+    const order = this.buildSeatOrder();
+    r.seatOrder = order;
     const hands = Object.fromEntries(order.map((id) => [id, []]));
     deck.forEach((c, i) => hands[order[i % order.length]].push(c));
 
     r.players = r.players.map((p) => ({
       ...p, hand: sortHand(hands[p.id], false), handCount: hands[p.id].length,
-      finished: false, finishOrder: null,
+      finished: false, finishOrder: null, foul: false, foulOrder: null,
     }));
+    r.foulSeq = 0;
     r.order = order;
     r.direction = 1;
     r.revolution = false;
@@ -261,14 +299,23 @@ export class DaifugoRoom {
       }
     }
 
-    // 開始プレイヤー
+    // 開始プレイヤー（currentTurnIndex は order の添字なので、必ず order から引く）
     let startIdx = 0;
-    if (rules.startCard === "spade3") {
-      const i = r.players.findIndex((p) => p.hand.some((c) => c.suit === "S" && c.rank === 3));
-      if (i >= 0) startIdx = i;
+    const startSuit = START_SUIT[rules.startCard];
+    if (startSuit) {
+      const holder = r.players.find((p) => p.hand.some((c) => c.suit === startSuit && c.rank === 3));
+      if (holder) {
+        const i = order.indexOf(holder.id);
+        if (i >= 0) startIdx = i;
+      }
     } else if (rules.startCard === "daihinmin" && r.classes) {
-      const i = r.players.findIndex((p) => r.classes[p.id] === "大貧民");
-      if (i >= 0) startIdx = i;
+      const p = r.players.find((pl) => r.classes[pl.id] === "大貧民");
+      if (p) {
+        const i = order.indexOf(p.id);
+        if (i >= 0) startIdx = i;
+      }
+    } else if (rules.startCard === "random") {
+      startIdx = Math.floor(Math.random() * order.length);
     }
     r.currentTurnIndex = startIdx;
     r.lastPlayerId = order[startIdx];
@@ -509,24 +556,29 @@ export class DaifugoRoom {
     if (rules.fiveSkip && play.kind === "set" && play.rank === 5) { skip += play.count; logExtra += "（5スキップ）"; }
     if (rules.thirteenSkip && play.kind === "set" && play.rank === 13) { skip += play.count; logExtra += "（13スキップ）"; }
 
+    // --- 出した手のログ（上がり処理より先に出す。あとに回すと反則の通知が
+    //     この行に上書きされて、画面上は最新1行しか見えないため気付けない） ---
+    const label = play.kind === "joker" ? "Joker" : play.kind === "stairs"
+      ? `${RANK_LABEL(play.startRank)}からの階段` : RANK_LABEL(play.rank);
+    r.log.push(`${me.name} が ${label} ${cards.length}枚${logExtra}`);
+
     // --- 上がり処理 ---
     let justFinished = false;
     if (newHand.length === 0) {
       justFinished = true;
       me.finished = true;
       if (foul) {
+        // 反則でも手は止めず、そのまま上がらせる。順位だけ下位に回す。
+        // 反則した順を控えておき、あとに反則した人ほど下位にする。
         me.foul = true;
-        me.finishOrder = r.players.length; // 反則は最下位
-        r.log.push(`${me.name} は反則上がり！ 最下位になりました`);
+        me.foulOrder = ++r.foulSeq;
+        me.finishOrder = r.players.length; // 仮置き。確定は checkGameEnd()
+        r.log.push(`${me.name} は反則上がり！（下位確定）`);
       } else {
         me.finishOrder = r.players.filter((p) => p.finished && !p.foul).length;
       }
       if (rules.agariNagashi) cut = true;
     }
-
-    const label = play.kind === "joker" ? "Joker" : play.kind === "stairs"
-      ? `${RANK_LABEL(play.startRank)}からの階段` : RANK_LABEL(play.rank);
-    r.log.push(`${me.name} が ${label} ${cards.length}枚${logExtra}`);
 
     // --- 場の更新 ---
     if (cut) {
@@ -596,6 +648,7 @@ export class DaifugoRoom {
     if (!r.pending) return { ok: false, message: "処理待ちはありません" };
     if (r.pending.playerId !== playerId) return { ok: false, message: "あなたの処理ではありません" };
     const me = r.players.find((p) => p.id === playerId);
+    const pendType = r.pending.type; // 下の上がり判定で使うので、null にする前に控える
 
     if (r.pending.type === "give") {
       const cards = payload && payload.cards;
@@ -626,15 +679,34 @@ export class DaifugoRoom {
         p.hand = p.hand.filter((c) => c.rank !== rank);
         p.handCount = p.hand.length;
         n += before - p.hand.length;
+        // Qボンバーで手札が尽きた人はそのまま上がり扱いにする。
+        // ここで上がらせないと、出す札もパスもできないまま手番が回り、進行が止まる。
+        // 自分の一手ではないので反則にはしない。
+        if (p.hand.length === 0) {
+          p.finished = true;
+          p.finishOrder = r.players.filter((q) => q.finished && !q.foul).length;
+          r.log.push(`${p.name} は手札が無くなり上がり（Qボンバー）`);
+        }
       }
       r.log.push(`${me.name} が ${RANK_LABEL(rank)} を宣言し、${n}枚が捨てられた（Qボンバー）`);
     }
 
     r.pending = null;
-    // 渡した結果あがった場合
+    // 渡した／捨てた結果あがった場合。
+    // 元の一手（7渡しなら7、10捨てなら10）で上がったのと同じなので、
+    // 「7で上がり禁止」「10で上がり禁止」が有効なら反則として扱う。
     if (me.hand.length === 0 && !me.finished) {
+      const fb = r.rules.forbidden;
+      const foul = (pendType === "give" && fb.seven) || (pendType === "discard" && fb.ten);
       me.finished = true;
-      me.finishOrder = r.players.filter((p) => p.finished && !p.foul).length;
+      if (foul) {
+        me.foul = true;
+        me.foulOrder = ++r.foulSeq;
+        me.finishOrder = r.players.length; // 仮置き。確定は checkGameEnd()
+        r.log.push(`${me.name} は反則上がり！（下位確定）`);
+      } else {
+        me.finishOrder = r.players.filter((p) => p.finished && !p.foul).length;
+      }
       r.adv.justFinished = true;
     }
     this.advanceTurn();
@@ -723,8 +795,9 @@ export class DaifugoRoom {
       last.finished = true;
       last.finishOrder = r.players.length;
     }
-    // 反則者を最下位に押し下げて順位を確定
-    const fouls = r.players.filter((p) => p.foul);
+    // 反則者を最下位に押し下げて順位を確定。
+    // 反則者どうしは「反則した順」で並べ、あとに反則した人ほど下位になる。
+    const fouls = r.players.filter((p) => p.foul).sort((a, b) => (a.foulOrder || 0) - (b.foulOrder || 0));
     const clean = r.players.filter((p) => !p.foul).sort((a, b) => (a.finishOrder || 99) - (b.finishOrder || 99));
     clean.forEach((p, i) => { p.finishOrder = i + 1; });
     fouls.forEach((p, i) => { p.finishOrder = clean.length + i + 1; });

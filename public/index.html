@@ -27,11 +27,11 @@ body{background:var(--bg);color:var(--text);margin:0}
 .panel{background:var(--panel);border:1px solid var(--border)}
 .t-main{color:var(--text)} .t-dim{color:var(--dim)} .t-accent{color:var(--accent)}
 .err{color:var(--err)}
-.title{font-family:serif;font-size:1.9rem;color:var(--accent);text-align:center;letter-spacing:.08em}
+.title{font-family:serif;font-size:2.15rem;color:var(--accent);text-align:center;letter-spacing:.08em}
 .roomcode{font-size:2.4rem;font-weight:700;text-align:center;letter-spacing:.4em;color:var(--text)}
 .divider{display:flex;align-items:center;gap:.5rem;margin:.75rem 0}
 .divider::before,.divider::after{content:"";height:1px;flex:1;background:var(--border)}
-.divider span{color:var(--dim);font-size:.7rem}
+.divider span{color:var(--dim);font-size:.82rem}
 .inp{background:var(--panel2);border:1px solid var(--border);color:var(--text)}
 .inp::placeholder{color:var(--dim)}
 button:disabled{opacity:.3}
@@ -47,47 +47,67 @@ button:disabled{opacity:.3}
 .card-sel{background:var(--sel);border-color:var(--sel-b);transform:translateY(-12px)}
 .card-joker{background:var(--jk);border-color:var(--jk-b)}
 .card.clickable:active{transform:scale(.94)}
-.cd-rank{font-weight:700;font-size:1.05rem;line-height:1.1}
-.card.small .cd-rank{font-size:.85rem}
-.cd-suit{font-size:.95rem;line-height:1}
-.card.small .cd-suit{font-size:.75rem}
+.cd-rank{font-weight:700;font-size:1.3rem;line-height:1.1}
+.card.small .cd-rank{font-size:1rem}
+.cd-suit{font-size:1.15rem;line-height:1}
+.card.small .cd-suit{font-size:.9rem}
 .c-red{color:var(--red)} .c-black{color:var(--black)} .c-joker{color:var(--jk-t)}
-.jk-face{font-size:20px;line-height:1}
-.card.small .jk-face{font-size:14px}
-.jk-txt{font-size:9px;font-weight:700;letter-spacing:.06em;color:var(--jk-t);margin-top:2px}
-.card.small .jk-txt{font-size:7px}
+.jk-face{font-size:24px;line-height:1}
+.card.small .jk-face{font-size:17px}
+.jk-txt{font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--jk-t);margin-top:2px}
+.card.small .jk-txt{font-size:8px}
 .hand-row{display:flex;gap:4px;overflow-x:auto;padding:14px 0 8px}
 
 /* ゲーム画面 */
-.topbar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;font-size:.7rem;color:var(--dim)}
-.chip{background:var(--panel2);border:1px solid var(--border);border-radius:999px;padding:1px 7px;font-size:.65rem;color:var(--dim)}
+.topbar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;font-size:.82rem;color:var(--dim)}
+.chip{background:var(--panel2);border:1px solid var(--border);border-radius:999px;padding:2px 8px;font-size:.76rem;color:var(--dim)}
 .chip-rev{background:var(--err);color:#fff;border-color:transparent;font-weight:700}
 .chip-lock{background:#0891b2;color:#fff;border-color:transparent;font-weight:700}
 .players{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;padding:0 10px 6px}
 .pcard{background:var(--panel2);border:1px solid var(--border);border-radius:12px;padding:6px 10px;text-align:center;min-width:74px}
 .pcard.turn{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
-.pname{font-size:.8rem;font-weight:500;color:var(--text)}
-.tag-cpu{font-size:.6rem;color:#0891b2;margin-left:3px}
-.mini-row{display:flex;flex-wrap:wrap;gap:2px;justify-content:center;max-width:140px;margin-top:3px}
-.mini{font-size:9px}
+.pname{font-size:.95rem;font-weight:500;color:var(--text)}
+.tag-cpu{font-size:.72rem;color:#0891b2;margin-left:3px}
+.tag-dummy{font-size:.72rem;color:#7c3aed;margin-left:3px}
+.mini-row{display:flex;flex-wrap:wrap;gap:3px;justify-content:center;max-width:160px;margin-top:4px}
+.mini{font-size:11px}
 .field{flex:1;display:flex;align-items:center;justify-content:center;background:var(--field);
   border:1px solid var(--field-b);border-radius:16px;margin:6px 12px;min-height:118px;padding:10px}
-.field-empty{color:var(--field-t);font-size:.8rem}
-.logline{padding:0 16px;font-size:.7rem;color:var(--dim);height:18px;text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
-.turnline{text-align:center;padding:6px 0;font-size:.85rem;font-weight:700}
+.field-empty{color:var(--field-t);font-size:.95rem}
+/* 場のカードは手札より大きく見せる（fieldDisplay は small で描画している） */
+.field .card.small{width:72px;height:103px;border-radius:10px;box-shadow:0 3px 8px rgba(0,0,0,.28)}
+.field .card.small .cd-rank{font-size:2.6rem}
+.field .card.small .cd-suit{font-size:2rem}
+.field .card.small .jk-face{font-size:46px}
+.field .card.small .jk-txt{font-size:13px}
+.logline{padding:0 16px;font-size:.82rem;color:var(--dim);height:21px;text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.turnline{text-align:center;padding:6px 0;font-size:1rem;font-weight:700}
 .dot{width:8px;height:8px;border-radius:999px;display:inline-block}
-.dot-human{background:#10b981} .dot-cpu{background:#06b6d4}
+.dot-human{background:#10b981} .dot-cpu{background:#06b6d4} .dot-dummy{background:#a78bfa}
+
+/* 開発者メニュー（?dev=1 でアクセスした端末にだけ出る） */
+.devbox{border:1px dashed var(--border);border-radius:10px;padding:10px;margin-bottom:8px}
+.dev-t{font-size:.82rem;color:var(--dim);margin:0 0 6px;letter-spacing:.05em}
+.dev-note{font-size:.78rem;color:var(--dim);line-height:1.45;margin:6px 0 0}
 .pending{background:var(--panel2);border:1px solid var(--accent);border-radius:10px;padding:8px;margin-bottom:8px}
-.pending-t{font-size:.78rem;color:var(--text);text-align:center;font-weight:600}
+.pending-t{font-size:.92rem;color:var(--text);text-align:center;font-weight:600}
 
 /* ルール設定 */
 .cat{border-top:1px solid var(--border)}
-.cat-head{width:100%;display:flex;justify-content:space-between;align-items:center;padding:10px 2px;font-size:.82rem;font-weight:600;color:var(--text)}
+.cat-head{width:100%;display:flex;justify-content:space-between;align-items:center;padding:11px 2px;font-size:.95rem;font-weight:600;color:var(--text)}
 .cat-body{padding:2px 2px 10px}
 .rule-row{display:flex;align-items:flex-start;gap:8px;padding:6px 0}
 .rule-check{margin-top:3px;accent-color:var(--accent);width:16px;height:16px;flex:0 0 auto}
-.rule-label{display:block;font-size:.8rem;color:var(--text)}
-.rule-desc{display:block;font-size:.68rem;color:var(--dim);line-height:1.35;margin-top:1px}
+.rule-label{display:block;font-size:.93rem;color:var(--text)}
+.rule-desc{display:block;font-size:.8rem;color:var(--dim);line-height:1.4;margin-top:2px}
+
+/* Tailwind の文字サイズユーティリティを底上げする。
+   cdn.tailwindcss.com は生成したCSSを後から差し込むため、
+   body を付けて詳細度で勝たせている（同点だと後勝ちで負けるため）。 */
+body .text-xs{font-size:.85rem;line-height:1.3rem}
+body .text-sm{font-size:1rem;line-height:1.45rem}
+body .text-\[10px\]{font-size:12px}
+body .text-\[11px\]{font-size:12.5px}
 </style>
 </head>
 <body>

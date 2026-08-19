@@ -14,8 +14,17 @@ export const RULE_CATEGORIES = [
         options: [{ v: 0, l: "0枚" }, { v: 1, l: "1枚" }, { v: 2, l: "2枚" }] },
       { key: "jokerSubstitute", label: "Joker代用", desc: "ペア・階段などの不足札の代わりに使える", type: "bool", default: true },
       { key: "passRestriction", label: "パス制限あり", desc: "一度パスすると場が流れるまで出せない", type: "bool", default: true },
-      { key: "startCard", label: "開始プレイヤー", desc: "誰から始めるか", type: "select", default: "none",
-        options: [{ v: "none", l: "部屋の先頭から" }, { v: "spade3", l: "♠3を持つ人" }, { v: "daihinmin", l: "前回の大貧民" }] },
+      { key: "startCard", label: "開始プレイヤー", desc: "1手目を誰から始めるか", type: "select", default: "diamond3",
+        options: [
+          { v: "diamond3", l: "♦3を持つ人" },
+          { v: "spade3", l: "♠3を持つ人" },
+          { v: "heart3", l: "♥3を持つ人" },
+          { v: "club3", l: "♣3を持つ人" },
+          { v: "daihinmin", l: "前回の大貧民" },
+          { v: "random", l: "ランダム" },
+        ] },
+      { key: "seatShuffle", label: "席順", desc: "手番が回る並び順を毎回入れ替えるか", type: "select", default: "every",
+        options: [{ v: "every", l: "毎回シャッフル" }, { v: "first", l: "初回のみシャッフル" }] },
     ],
   },
   {
@@ -169,7 +178,7 @@ export const PRESETS = [
       }
       all.jokerCount = 2;
       all.exchange = "normal";
-      all.startCard = "spade3";
+      all.startCard = "diamond3";
       all.jokerRevolutionBan = false; // 全部入りでも代用は活かす
       all.forbidden = fb;
       return all;
