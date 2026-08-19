@@ -44,7 +44,7 @@ const state = {
   night: localStorage.getItem("daifugo-night") === "1",
   screen: "home", room: null, error: "", selected: [], ws: null,
   showRules: false, openCat: null, draftRules: null,
-  testMode: false, showGameRules: false,
+  testMode: false, showGameRules: false, menu: null,
 };
 localStorage.setItem("daifugo-pid", state.playerId);
 
@@ -91,10 +91,22 @@ function connect(code, first) {
       if (d.room.status === "playing" || d.room.status === "exchange") state.screen = "game";
       else if (d.room.status === "finished") state.screen = "finished";
       else state.screen = "lobby";
-    } else if (d.type === "error") state.error = d.message;
+    } else if (d.type === "disbanded") { resetToTitle("部屋が解散されました"); return; }
+    else if (d.type === "error") state.error = d.message;
     render();
   };
   state.ws = ws;
+}
+
+// 部屋との接続を切ってスタート画面へ。詰まったときの共通の脱出口
+function resetToTitle(message) {
+  if (state.ws) { try { state.ws.close(); } catch { /* 切れていれば何もしない */ } }
+  Object.assign(state, {
+    ws: null, room: null, draftRules: null, selected: [], menu: null,
+    showRules: false, openCat: null, testMode: false, showGameRules: false,
+    error: message || "", screen: "home",
+  });
+  render();
 }
 
 // ---------- 操作 ----------
@@ -128,15 +140,16 @@ W.removeCPU = () => send({ type: "removeCPU", asPlayerId: null });
 W.addDummy = () => send({ type: "addDummy", asPlayerId: null });
 W.removeDummy = () => send({ type: "removeDummy", asPlayerId: null });
 W.rematch = () => send({ type: "rematch", asPlayerId: null });
+// スタート画面に戻る。ロビーなら席も空ける（対戦中はサーバーが退出を受け付けないので、
+// 接続だけ切って抜ける。playerId は端末に残るので、同じ部屋コードで入り直せば席に戻れる）
 W.leaveRoom = () => {
-  send({ type: "leave", asPlayerId: null });
-  if (state.ws) state.ws.close();
-  Object.assign(state, {
-    ws: null, room: null, draftRules: null, selected: [],
-    showRules: false, openCat: null, testMode: false, error: "", screen: "home",
-  });
-  render();
+  if (state.room && state.room.status === "waiting") send({ type: "leave", asPlayerId: null });
+  resetToTitle();
 };
+W.toggleMenu = (v) => { state.menu = v || null; render(); };
+W.closeMenu = (e) => { if (e.target.classList.contains("overlay")) { state.menu = null; render(); } };
+W.abortGame = () => { state.menu = null; send({ type: "abort", asPlayerId: null }); };
+W.disbandRoom = () => { state.menu = null; send({ type: "disband", asPlayerId: null }); };
 W.toggleTestMode = () => { state.testMode = !state.testMode; render(); };
 W.toggleRulesPanel = () => { state.showRules = !state.showRules; render(); };
 W.toggleCat = (id) => { state.openCat = state.openCat === id ? null : id; render(); };
@@ -281,6 +294,41 @@ function gameRulesOverlay() {
       ${rulesPanel(false)}
     </div></div>`;
 }
+// どの画面からでも抜けられるようにするメニュー。
+// 「中断」「解散」は取り返しがつかないので、必ず確認をはさむ（state.menu が段階を持つ）
+function menuBtn() {
+  return `<button onclick="toggleMenu('main')" class="btn-sub menu-btn" title="メニュー">☰</button>`;
+}
+function confirmBox(title, body, okLabel, fn) {
+  return `<div class="overlay overlay-center"><div class="overlay-body">
+    <p class="pop-t">${title}</p>
+    <p class="pop-d">${body}</p>
+    <div class="flex gap-2 mt-4">
+      <button onclick="toggleMenu('main')" class="btn-sub rounded-lg py-3 font-bold" style="flex:1">やめる</button>
+      <button onclick="${fn}()" class="btn-play rounded-lg py-3 font-bold" style="flex:1">${okLabel}</button>
+    </div></div></div>`;
+}
+function menuOverlay() {
+  if (!state.menu) return "";
+  const r = state.room;
+  const isHost = !!r && r.hostId === state.playerId;
+  const playing = !!r && (r.status === "playing" || r.status === "exchange");
+  if (state.menu === "abort") return confirmBox("対戦を中断しますか？",
+    "いまの対戦をやめて、全員ロビーに戻します。手札と順位は失われます。", "中断する", "abortGame");
+  if (state.menu === "disband") return confirmBox("部屋を解散しますか？",
+    "部屋そのものを消します。全員がスタート画面に戻り、この部屋コードは使えなくなります。", "解散する", "disbandRoom");
+  return `<div class="overlay overlay-center" onclick="closeMenu(event)"><div class="overlay-body">
+    <div class="overlay-head"><span>メニュー</span>
+      <button onclick="toggleMenu()" class="btn-sub px-3 py-1 rounded-lg text-sm">閉じる</button></div>
+    <div class="menu-list">
+      ${isHost && playing ? `<button onclick="toggleMenu('abort')" class="btn-sub menu-item">対戦を中断してロビーへ</button>` : ""}
+      ${isHost ? `<button onclick="toggleMenu('disband')" class="btn-sub menu-item">部屋を解散する</button>` : ""}
+      <button onclick="leaveRoom()" class="btn-sub menu-item">タイトルに戻る</button>
+    </div>
+    <p class="dev-note">「タイトルに戻る」は自分だけが抜けます。同じ端末なら、同じ部屋コードで入り直せば席に戻れます。
+    ${isHost ? "" : "「中断」「解散」はホストだけが操作できます。"}</p>
+  </div></div>`;
+}
 function rulesPanel(editable) {
   const rules = editable ? state.draftRules : state.room.rules;
   const activeId = activePresetId(rules);
@@ -354,7 +402,14 @@ function paint() {
   }
 
   const r = state.room;
-  if (!r) { app.innerHTML = `<div class="min-h-screen flex items-center justify-center t-dim">接続中…</div>`; return; }
+  // 接続待ちのまま返事が来ないこともあるので、ここにも脱出口を置く
+  if (!r) {
+    app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-4">
+      <span class="t-dim">接続中…</span>
+      <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm">タイトルに戻る</button>
+    </div>`;
+    return;
+  }
   const isHost = r.hostId === state.playerId;
   const me = r.players.find((p) => p.id === state.playerId);
 
@@ -365,7 +420,7 @@ function paint() {
     app.innerHTML = `<div class="min-h-screen p-4"><div class="max-w-sm mx-auto">
       <div class="flex justify-between items-center mb-2">
         <button onclick="leaveRoom()" class="btn-sub px-3 py-1 rounded-lg text-xs">← 戻る</button>
-        ${nightBtn()}
+        <span class="flex gap-2 items-center">${menuBtn()}${nightBtn()}</span>
       </div>
       <h2 class="t-accent text-center text-sm mb-1">部屋コード</h2>
       <div class="roomcode">${r.code}</div>
@@ -403,7 +458,7 @@ function paint() {
         ${r.players.length < minPlayers ? `${minPlayers}人以上で開始できます` : testOn ? "テストモードで開始" : "ゲーム開始"}</button>`
       : `<p class="t-dim text-center">ホストの開始を待っています…</p>`}
       ${state.error ? `<p class="err mt-3 text-center text-sm">${esc(state.error)}</p>` : ""}
-    </div></div>`;
+    </div>${menuOverlay()}</div>`;
     return;
   }
 
@@ -423,7 +478,8 @@ function paint() {
       const task = r.exchangeNeeded[0];
       const mine = task && (isTest || task.upperId === state.playerId);
       app.innerHTML = `<div class="min-h-screen p-4 flex flex-col">
-        <div class="flex justify-between items-center mb-3"><span class="t-dim text-xs">カード交換</span>
+        <div class="flex justify-between items-center mb-3">
+          <span class="flex gap-2 items-center">${menuBtn()}<span class="t-dim text-xs">カード交換</span></span>
           <span class="flex gap-2 items-center">
             <button onclick="toggleGameRules()" class="btn-sub px-3 py-1 rounded-lg text-xs">ルール</button>${nightBtn()}
           </span></div>
@@ -434,7 +490,7 @@ function paint() {
           ${handRow(hand)}
           ${state.error ? `<p class="err text-xs mb-2 text-center">${esc(state.error)}</p>` : ""}
           <button onclick="submitExchange()" class="btn-play w-full py-3 rounded-lg font-bold">${state.selected.length}/${task.n} 枚を渡す</button>
-        </div>` : ""}${gameRulesOverlay()}</div>`;
+        </div>` : ""}${gameRulesOverlay()}${menuOverlay()}</div>`;
       return;
     }
 
@@ -468,7 +524,7 @@ function paint() {
 
     app.innerHTML = `<div class="min-h-screen flex flex-col">
       <div class="topbar">
-        <span>部屋 ${r.code}${isTest ? ' <b class="err">TEST</b>' : ""}</span>
+        <span class="flex gap-2 items-center">${menuBtn()}部屋 ${r.code}${isTest ? ' <b class="err">TEST</b>' : ""}</span>
         <span class="flex gap-2 items-center">
           <button onclick="toggleGameRules()" class="btn-sub px-3 py-1 rounded-lg text-sm">ルール</button>
           ${nightBtn()}
@@ -500,14 +556,14 @@ function paint() {
           <button onclick="submitPass()" ${!canAct || !r.field ? "disabled" : ""} class="btn-pass rounded-lg font-bold" style="flex:4 1 0%">パス</button>
           <button onclick="submitPlay()" ${!canAct ? "disabled" : ""} class="btn-play rounded-lg font-bold" style="flex:6 1 0%">出す</button>
         </div>`}
-      </div>${popModal}${gameRulesOverlay()}</div>`;
+      </div>${popModal}${gameRulesOverlay()}${menuOverlay()}</div>`;
     return;
   }
 
   if (state.screen === "finished") {
     const ranked = [...r.players].sort((a, b) => (a.finishOrder || 99) - (b.finishOrder || 99));
     app.innerHTML = `<div class="min-h-screen p-4 flex flex-col items-center justify-center">
-      <div class="w-full max-w-sm flex justify-end mb-2">${nightBtn()}</div>
+      <div class="w-full max-w-sm flex justify-between items-center mb-2">${menuBtn()}${nightBtn()}</div>
       <h2 class="title mb-5">結果発表</h2>
       <div class="w-full max-w-sm space-y-2 mb-5">
         ${ranked.map((p) => {
@@ -521,9 +577,16 @@ function paint() {
         }).join("")}
       </div>
       ${isHost ? `<button onclick="rematch()" class="btn-play px-6 py-3 rounded-lg font-bold">もう一度遊ぶ</button>` : `<p class="t-dim text-sm">ホストの操作を待っています…</p>`}
-    </div>`;
+      <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm mt-3">タイトルに戻る</button>
+    </div>${menuOverlay()}`;
     return;
   }
+
+  // どの画面にも当てはまらないとき（席が無くなった等）。真っ白のまま操作不能にしない
+  app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-4">
+    <span class="t-dim">この部屋の席がありません</span>
+    <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm">タイトルに戻る</button>
+  </div>`;
 }
 
 document.body.classList.toggle("night", state.night);

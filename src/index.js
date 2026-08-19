@@ -173,7 +173,45 @@ export class DaifugoRoom {
         r.players.push({ id: playerId, name: msg.name, hand: [], handCount: 0, finished: false, finishOrder: null });
         r.log.push(`${msg.name} が参加しました`);
       }
+      // ホストが繋がっていない部屋は中断も解散も誰にもできなくなる。
+      // 放置された部屋を自力で片付けられるよう、入ってきた人にホストを渡す。
+      if (![...this.sessions.values()].includes(r.hostId)) {
+        r.hostId = playerId;
+        r.log.push(`${msg.name} がホストになりました`);
+      }
       await this.persistAndBroadcast();
+      return;
+    }
+
+    // 対戦を中断してロビーに戻す（ホストのみ）。
+    // 進行が詰まったときの脱出口なので、状態は playing / exchange のどちらからでも受ける。
+    if (type === "abort") {
+      if (r.hostId !== playerId) { ws.send(JSON.stringify({ type: "error", message: "ホストだけが操作できます" })); return; }
+      r.status = "waiting";
+      r.order = [];
+      r.currentTurnIndex = 0;
+      r.pending = null; r.adv = null;
+      r.exchangeNeeded = []; r.exchangeGiven = {};
+      r.revolution = false; r.revolutionLocked = false; r.direction = 1;
+      this.clearField(r);
+      for (const p of r.players) {
+        p.hand = []; p.handCount = 0;
+        p.finished = false; p.finishOrder = null; p.foul = false; p.foulOrder = null;
+      }
+      r.log.push("対戦を中断しました");
+      await this.persistAndBroadcast();
+      return;
+    }
+
+    // 部屋ごと消す（ホストのみ）。全員がスタート画面に戻る
+    if (type === "disband") {
+      if (r.hostId !== playerId) { ws.send(JSON.stringify({ type: "error", message: "ホストだけが操作できます" })); return; }
+      for (const [sock] of this.sessions.entries()) {
+        try { sock.send(JSON.stringify({ type: "disbanded" })); } catch {}
+      }
+      this.room = null;
+      this.sessions.clear();
+      await this.state.storage.deleteAll();
       return;
     }
 
