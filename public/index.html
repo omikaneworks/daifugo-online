@@ -10,17 +10,23 @@
   --bg:#f1f2f4; --panel:#fff; --panel2:#f7f8fa; --border:#d9dce1;
   --text:#1c1f24; --dim:#6b7280; --accent:#c8940f; --accent-t:#2a2005;
   --field:#1f7a4d; --field-b:#17603c; --field-t:#dff5e8;
+  /* 強弱が逆転している間の場の色（革命・11バック等） */
+  --field-rev:#8e2b3f; --field-rev-b:#6d1f30; --field-rev-t:#ffe1e7;
   --card:#fdfdfb; --card-b:#c9ccd2; --sel:#fff6dc; --sel-b:#c8940f;
   --jk:#f6f0ff; --jk-b:#a78bfa; --jk-t:#6d28d9;
   --red:#dc2626; --black:#1c1f24; --err:#dc2626;
+  /* パスボタン（出すボタンと見分けが付くよう、地の色を持たせる） */
+  --pass-bg:#dfe3ea; --pass-t:#39404d; --pass-b:#c2c8d2;
 }
 body.night{
   --bg:#14161a; --panel:#1e2127; --panel2:#262a31; --border:#363b44;
   --text:#e8eaed; --dim:#9aa0a8; --accent:#e0b93f; --accent-t:#1c1608;
   --field:#17452f; --field-b:#0f3623; --field-t:#bfe6d0;
+  --field-rev:#5c1d2a; --field-rev-b:#3d111a; --field-rev-t:#f0c8d0;
   --card:#e9e9e6; --card-b:#8b8f96; --sel:#f5e6b8; --sel-b:#e0b93f;
   --jk:#e6dcf7; --jk-b:#8b5cf6; --jk-t:#5b21b6;
   --red:#c62828; --black:#1c1f24; --err:#f87171;
+  --pass-bg:#3a424f; --pass-t:#e3e7ed; --pass-b:#4d5666;
 }
 *{-webkit-tap-highlight-color:transparent}
 body{background:var(--bg);color:var(--text);margin:0}
@@ -36,7 +42,7 @@ body{background:var(--bg);color:var(--text);margin:0}
 .inp::placeholder{color:var(--dim)}
 button:disabled{opacity:.3}
 .btn-play{background:var(--accent);color:var(--accent-t);padding-top:.85rem;padding-bottom:.85rem}
-.btn-pass{background:var(--panel2);color:var(--dim);border:1px solid var(--border);padding-top:.85rem;padding-bottom:.85rem}
+.btn-pass{background:var(--pass-bg);color:var(--pass-t);border:1px solid var(--pass-b);padding-top:.85rem;padding-bottom:.85rem}
 .btn-sub{background:var(--panel2);color:var(--text);border:1px solid var(--border)}
 
 /* カード */
@@ -56,11 +62,25 @@ button:disabled{opacity:.3}
 .card.small .jk-face{font-size:17px}
 .jk-txt{font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--jk-t);margin-top:2px}
 .card.small .jk-txt{font-size:8px}
-.hand-row{display:flex;gap:4px;overflow-x:auto;padding:14px 0 8px}
+/* 手札は横スクロールだと見にくいので、何枚でも1行に重ねて並べる。
+   重なっても見分けられるよう、中身はカードの左端に寄せている（実物の隅の表記と同じ）。
+   重なり量 --hand-m と文字サイズ --hand-fs は app.js の layoutHand() が
+   実際の幅から計算して入れる（枚数が多いほど詰まり、文字も小さくなる）。 */
+.hand-row{display:flex;overflow-x:auto;padding:14px 0 4px}
+.hand-row .card{position:relative;align-items:flex-start;justify-content:center;padding-left:3px;
+  margin-right:var(--hand-m,4px)}
+.hand-row .card:last-child{margin-right:0}
+.hand-row .cd-rank{font-size:var(--hand-fs,17.6px)}
+.hand-row .cd-suit{font-size:calc(var(--hand-fs,17.6px) * .88)}
+.hand-row .jk-face{font-size:calc(var(--hand-fs,17.6px) * 1.2)}
+.hand-row .jk-txt{display:none}
 
 /* ゲーム画面 */
-.topbar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;font-size:.82rem;color:var(--dim)}
-.chip{background:var(--panel2);border:1px solid var(--border);border-radius:999px;padding:2px 8px;font-size:.76rem;color:var(--dim)}
+.topbar{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;font-size:.98rem;color:var(--dim)}
+.topbar b{font-size:.9rem}
+/* 進行中の状態を出す行。チップに説明を入れると横に並ばないので独立させている */
+.status{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;padding:0 12px 8px}
+.chip{background:var(--panel2);border:1px solid var(--border);border-radius:999px;padding:4px 11px;font-size:.88rem;color:var(--dim)}
 .chip-rev{background:var(--err);color:#fff;border-color:transparent;font-weight:700}
 .chip-lock{background:#0891b2;color:#fff;border-color:transparent;font-weight:700}
 .players{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;padding:0 10px 6px}
@@ -69,17 +89,27 @@ button:disabled{opacity:.3}
 .pname{font-size:.95rem;font-weight:500;color:var(--text)}
 .tag-cpu{font-size:.72rem;color:#0891b2;margin-left:3px}
 .tag-dummy{font-size:.72rem;color:#7c3aed;margin-left:3px}
-.mini-row{display:flex;flex-wrap:wrap;gap:3px;justify-content:center;max-width:160px;margin-top:4px}
-.mini{font-size:11px}
 .field{flex:1;display:flex;align-items:center;justify-content:center;background:var(--field);
-  border:1px solid var(--field-b);border-radius:16px;margin:6px 12px;min-height:118px;padding:10px}
+  border:1px solid var(--field-b);border-radius:16px;margin:6px 12px;min-height:102px;padding:8px}
 .field-empty{color:var(--field-t);font-size:.95rem}
+/* 強弱が逆転している間は場を赤くする（革命中／11バック等の一時反転）。
+   両方が同時に立つと打ち消し合って通常に戻るので、判定は effRev() を使うこと */
+.field.rev{background:var(--field-rev);border-color:var(--field-rev-b)}
+.field.rev .field-empty{color:var(--field-rev-t)}
 /* 場のカードは手札より大きく見せる（fieldDisplay は small で描画している） */
-.field .card.small{width:72px;height:103px;border-radius:10px;box-shadow:0 3px 8px rgba(0,0,0,.28)}
-.field .card.small .cd-rank{font-size:2.6rem}
-.field .card.small .cd-suit{font-size:2rem}
-.field .card.small .jk-face{font-size:46px}
-.field .card.small .jk-txt{font-size:13px}
+.field .card.small{width:62px;height:89px;border-radius:9px;box-shadow:0 3px 8px rgba(0,0,0,.28)}
+.field .card.small .cd-rank{font-size:2.2rem}
+.field .card.small .cd-suit{font-size:1.7rem}
+.field .card.small .jk-face{font-size:39px}
+.field .card.small .jk-txt{font-size:11px}
+/* 直近に出た数手を横に並べる。今の場だけ大きく、それ以前は小さく薄く。 */
+.pile{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;width:100%}
+.pile-g{display:flex;gap:3px;flex-wrap:wrap;justify-content:center}
+.field .pile-g.old .card.small{width:38px;height:54px;border-radius:7px;opacity:.55;box-shadow:none;border-width:1px}
+.field .pile-g.old .card.small .cd-rank{font-size:1.25rem}
+.field .pile-g.old .card.small .cd-suit{font-size:1rem}
+.field .pile-g.old .card.small .jk-face{font-size:22px}
+.field .pile-g.old .card.small .jk-txt{font-size:7px}
 .logline{padding:0 16px;font-size:.82rem;color:var(--dim);height:21px;text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .turnline{text-align:center;padding:6px 0;font-size:1rem;font-weight:700}
 .dot{width:8px;height:8px;border-radius:999px;display:inline-block}
@@ -89,8 +119,15 @@ button:disabled{opacity:.3}
 .devbox{border:1px dashed var(--border);border-radius:10px;padding:10px;margin-bottom:8px}
 .dev-t{font-size:.82rem;color:var(--dim);margin:0 0 6px;letter-spacing:.05em}
 .dev-note{font-size:.78rem;color:var(--dim);line-height:1.45;margin:6px 0 0}
-.pending{background:var(--panel2);border:1px solid var(--accent);border-radius:10px;padding:8px;margin-bottom:8px}
-.pending-t{font-size:.92rem;color:var(--text);text-align:center;font-weight:600}
+/* 保留アクション（7渡し / 10捨て / Qボンバー）のポップアップ。
+   7渡し・10捨ては手札から札を選ぶ操作が要るので、画面を塞ぐモーダルにはできない。
+   手札パネルを基準に、そのすぐ上へ浮かせている（.panel-bottom が位置の基準）。 */
+.panel-bottom{position:relative}
+.pop-above{position:absolute;left:6px;right:6px;bottom:calc(100% + 8px);z-index:30;
+  background:var(--panel);border:2px solid var(--accent);border-radius:14px;
+  box-shadow:0 8px 24px rgba(0,0,0,.35);padding:11px 12px}
+.pop-t{font-size:1.05rem;font-weight:700;color:var(--accent);text-align:center}
+.pop-d{font-size:.88rem;color:var(--dim);text-align:center;margin-top:2px;line-height:1.4}
 
 /* ルール設定 */
 .cat{border-top:1px solid var(--border)}
@@ -100,6 +137,30 @@ button:disabled{opacity:.3}
 .rule-check{margin-top:3px;accent-color:var(--accent);width:16px;height:16px;flex:0 0 auto}
 .rule-label{display:block;font-size:.93rem;color:var(--text)}
 .rule-desc{display:block;font-size:.8rem;color:var(--dim);line-height:1.4;margin-top:2px}
+/* ONの項目をひと目で分かるようにする */
+.rule-row.rule-on{background:var(--panel2);border-radius:6px;margin:0 -4px;padding-left:4px;padding-right:4px}
+.rule-row.rule-on .rule-label{color:var(--accent);font-weight:700}
+.rule-val{color:var(--accent);font-weight:700;margin-left:6px;font-size:.85em}
+
+/* プリセット */
+.preset-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+.preset-now{font-size:.72rem;font-weight:700;color:var(--accent)}
+.preset{position:relative}
+.preset-on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);background:var(--panel)}
+.preset-check{position:absolute;top:4px;right:6px;color:var(--accent);font-weight:700;font-size:.8rem}
+.preset-del{position:absolute;top:2px;right:5px;color:var(--dim);font-size:1rem;line-height:1;padding:2px 4px}
+.preset-on .preset-del{right:20px}
+.preset-save{display:flex;gap:6px;margin-top:8px}
+
+/* ゲーム中のルール確認（重ね表示） */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center;z-index:50}
+.overlay-body{background:var(--panel);border:1px solid var(--border);border-radius:16px 16px 0 0;
+  width:100%;max-width:430px;max-height:85vh;overflow-y:auto;padding:12px 12px 24px}
+.overlay-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-weight:700;color:var(--text)}
+/* Qボンバーのように「選ぶだけ」のものは画面中央のダイアログにする */
+.overlay-center{align-items:center}
+.overlay-center .overlay-body{border-radius:16px;width:calc(100% - 32px);max-width:360px;
+  border-color:var(--accent);border-width:2px;padding:14px}
 
 /* Tailwind の文字サイズユーティリティを底上げする。
    cdn.tailwindcss.com は生成したCSSを後から差し込むため、

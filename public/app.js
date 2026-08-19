@@ -1,4 +1,17 @@
-import { RULE_CATEGORIES, buildDefaultRules, PRESETS } from "./rules.js";
+import { RULE_CATEGORIES, buildDefaultRules, PRESETS, presetRules, sameRules } from "./rules.js";
+
+// --- 自作プリセット（この端末に保存される）---
+const CUSTOM_KEY = "daifugo-presets";
+function loadCustomPresets() {
+  try { return JSON.parse(localStorage.getItem(CUSTOM_KEY)) || []; } catch { return []; }
+}
+function saveCustomPresets(list) { localStorage.setItem(CUSTOM_KEY, JSON.stringify(list)); }
+const allPresets = () => [...PRESETS, ...loadCustomPresets()];
+// 今の設定がどのプリセットと一致するか。どれとも違えば null（＝カスタム設定）
+function activePresetId(rules) {
+  for (const p of allPresets()) if (sameRules(presetRules(p), rules)) return p.id;
+  return null;
+}
 
 const RANK_LABEL = (r) => ({ 11: "J", 12: "Q", 13: "K", 14: "A", 15: "2", 16: "Joker" }[r] || String(r));
 const SUIT_SYMBOL = { S: "♠", H: "♥", D: "♦", C: "♣", JOKER: "★" };
@@ -31,17 +44,15 @@ const state = {
   night: localStorage.getItem("daifugo-night") === "1",
   screen: "home", room: null, error: "", selected: [], ws: null,
   showRules: false, openCat: null, draftRules: null,
-  testMode: false,
+  testMode: false, showGameRules: false,
 };
 localStorage.setItem("daifugo-pid", state.playerId);
 
-// 開発者モード：?dev=1 を付けてアクセスした端末だけテスト機能が見える。
-// 一度アクセスすればその端末に記憶される（?dev=0 で解除）。
-// 友達に渡す通常URLでは何も表示されない。
-const devParam = new URLSearchParams(location.search).get("dev");
-if (devParam === "1") localStorage.setItem("daifugo-dev", "1");
-else if (devParam === "0") localStorage.removeItem("daifugo-dev");
-const IS_DEV = localStorage.getItem("daifugo-dev") === "1";
+// 開発者モード：URLに ?dev=1 が付いているときだけテスト機能が見える。
+// 端末に記憶はしない（通常URLで開けば必ずOFF）。記憶すると、通常URLを開いた
+// つもりでも開発者メニューが出続けて紛らわしいため。
+const IS_DEV = new URLSearchParams(location.search).get("dev") === "1";
+localStorage.removeItem("daifugo-dev"); // 記憶方式だった頃の値の後始末
 
 // ダミー席がある部屋は必ずテストモード（誰も自動で着手しないため）
 function effTestMode() {
@@ -103,12 +114,29 @@ W.joinRoom = () => {
   localStorage.setItem("daifugo-name", state.name);
   connect(code, { type: "join", playerId: state.playerId, name: state.name });
 };
+// 開発用：部屋コードのやり取りを省いて、決め打ちの部屋に直行する（?dev=1 のときだけ出る）
+const DEV_CODE = "DEV0";
+W.devEnter = () => {
+  const input = document.getElementById("name-input");
+  state.name = ((input ? input.value : "") || "").trim() || "開発者";
+  localStorage.setItem("daifugo-name", state.name);
+  connect(DEV_CODE, { type: "enter", playerId: state.playerId, name: state.name, code: DEV_CODE });
+};
 W.startGame = () => send({ type: "start", testMode: effTestMode(), asPlayerId: null });
 W.addCPU = () => send({ type: "addCPU", asPlayerId: null });
 W.removeCPU = () => send({ type: "removeCPU", asPlayerId: null });
 W.addDummy = () => send({ type: "addDummy", asPlayerId: null });
 W.removeDummy = () => send({ type: "removeDummy", asPlayerId: null });
 W.rematch = () => send({ type: "rematch", asPlayerId: null });
+W.leaveRoom = () => {
+  send({ type: "leave", asPlayerId: null });
+  if (state.ws) state.ws.close();
+  Object.assign(state, {
+    ws: null, room: null, draftRules: null, selected: [],
+    showRules: false, openCat: null, testMode: false, error: "", screen: "home",
+  });
+  render();
+};
 W.toggleTestMode = () => { state.testMode = !state.testMode; render(); };
 W.toggleRulesPanel = () => { state.showRules = !state.showRules; render(); };
 W.toggleCat = (id) => { state.openCat = state.openCat === id ? null : id; render(); };
@@ -124,12 +152,29 @@ W.setRule = (key, group, value) => {
   render();
 };
 W.applyPreset = (id) => {
-  const p = PRESETS.find((x) => x.id === id);
+  const p = allPresets().find((x) => x.id === id);
   if (!p) return;
-  const base = buildDefaultRules();
-  state.draftRules = { ...base, ...p.apply, forbidden: { ...base.forbidden, ...(p.apply.forbidden || {}) } };
+  state.draftRules = presetRules(p);
   send({ type: "setRules", rules: state.draftRules, asPlayerId: null });
 };
+W.saveAsPreset = () => {
+  const input = document.getElementById("preset-name");
+  const label = (input ? input.value : "").trim();
+  if (!label) { state.error = "プリセット名を入力してください"; return render(); }
+  const list = loadCustomPresets();
+  const existing = list.findIndex((p) => p.label === label);
+  const entry = { id: existing >= 0 ? list[existing].id : `my-${Date.now()}`, label, custom: true,
+    desc: "自分で保存した設定", apply: JSON.parse(JSON.stringify(state.draftRules)) };
+  if (existing >= 0) list[existing] = entry; else list.push(entry);
+  saveCustomPresets(list);
+  state.error = "";
+  render();
+};
+W.deletePreset = (id) => {
+  saveCustomPresets(loadCustomPresets().filter((p) => p.id !== id));
+  render();
+};
+W.toggleGameRules = () => { state.showGameRules = !state.showGameRules; render(); };
 W.applyRules = () => send({ type: "setRules", rules: state.draftRules, asPlayerId: null });
 W.toggleSelect = (json) => {
   const card = JSON.parse(decodeURIComponent(json));
@@ -155,7 +200,7 @@ W.submitExchange = () => {
 
 // ---------- 描画パーツ ----------
 function nightBtn() {
-  return `<button onclick="toggleNight()" class="btn-sub px-3 py-1 rounded-lg text-xs">${state.night ? "☀︎" : "☾"}</button>`;
+  return `<button onclick="toggleNight()" class="btn-sub px-3 py-1 rounded-lg text-sm">${state.night ? "☀︎" : "☾"}</button>`;
 }
 function cardFace(card, selected, clickable, small) {
   const isJoker = card.suit === "JOKER";
@@ -168,13 +213,36 @@ function cardFace(card, selected, clickable, small) {
     <span class="cd-rank ${SUIT_COLOR[card.suit]}">${RANK_LABEL(card.rank)}</span>
     <span class="cd-suit ${SUIT_COLOR[card.suit]}">${SUIT_SYMBOL[card.suit]}</span></button>`;
 }
-function fieldDisplay(f) {
-  if (!f) return `<p class="field-empty">場は空です（自由に出せます）</p>`;
-  if (f.cards && f.cards.length) return `<div class="flex gap-1 flex-wrap justify-center">${f.cards.map((c) => cardFace(c, false, false, true)).join("")}</div>`;
-  return `<div class="flex gap-1">${Array.from({ length: f.count }).map(() => cardFace({ suit: "S", rank: f.rank || 3 }, false, false, true)).join("")}</div>`;
+// 手札は何枚でも必ず1行。カードを重ねて幅に収める（CSSの .hand-row 参照）
+function handRow(hand) {
+  return `<div class="hand-row">${hand.map((c) =>
+    cardFace(c, state.selected.some((s) => s.id === c.id), true, false)).join("")}</div>`;
 }
-function miniHand(hand, rev) {
-  return sortHand(hand, rev).map((c) => `<span class="mini ${SUIT_COLOR[c.suit]}">${c.suit === "JOKER" ? "🃏" : SUIT_SYMBOL[c.suit] + RANK_LABEL(c.rank)}</span>`).join("");
+// 重なり量と文字サイズは、描画後の実際の幅から決める。
+// 枚数が多いほど詰まり、左端に残る帯（＝見える幅）に収まるところまで数字を縮める。
+const CARD_W = 56;
+function layoutHand() {
+  for (const row of document.querySelectorAll(".hand-row")) {
+    const n = row.children.length;
+    if (!n) continue;
+    const w = row.clientWidth - 1; // 端数で横スクロールが出ないよう1px余らせる
+    const strip = n > 1 ? Math.min(CARD_W + 4, (w - CARD_W) / (n - 1)) : CARD_W;
+    // 「10」が帯に収まる大きさ。1.2 は太字2桁のおおよその幅（em）
+    const fs = Math.max(10, Math.min(17.6, (strip - 3) / 1.2));
+    row.style.setProperty("--hand-m", (strip - CARD_W).toFixed(2) + "px");
+    row.style.setProperty("--hand-fs", fs.toFixed(1) + "px");
+  }
+}
+window.addEventListener("resize", layoutHand);
+// 場は、いま場が流れずに続いている間に出た手をまとめて見せる（room.pile）。
+// 最後の1手だけ大きく、それより前の手は小さく薄く左に並べる。
+// 場が流れると pile はサーバー側で空になるので、ここも自動的に「場は空です」に戻る。
+function fieldDisplay(r) {
+  const pile = r.pile || [];
+  if (!pile.length) return `<p class="field-empty">場は空です（自由に出せます）</p>`;
+  const lastIdx = pile.length - 1;
+  return `<div class="pile">${pile.map((g, i) => `<div class="pile-g ${i === lastIdx ? "now" : "old"}">${
+    g.cards.map((c) => cardFace(c, false, false, true)).join("")}</div>`).join("")}</div>`;
 }
 function rulesSummary(rules) {
   let n = 0;
@@ -190,27 +258,53 @@ function ruleRow(rule, rules, editable) {
   const dis = editable ? "" : "disabled";
   const g = rule.group || "";
   if (rule.type === "select") {
-    return `<label class="rule-row">
-      <span class="flex-1"><span class="rule-label">${rule.label}</span>
+    const opt = rule.options.find((o) => String(o.v) === String(val));
+    return `<label class="rule-row rule-sel">
+      <span class="flex-1"><span class="rule-label">${rule.label}<span class="rule-val">${esc(opt ? opt.l : "")}</span></span>
       ${rule.desc ? `<span class="rule-desc">${rule.desc}</span>` : ""}</span>
       <select ${dis} onchange="setRule('${rule.key}','${g}', this.value === String(Number(this.value)) ? Number(this.value) : this.value)" class="inp text-xs rounded px-2 py-1 ml-2">
         ${rule.options.map((o) => `<option value="${o.v}" ${String(val) === String(o.v) ? "selected" : ""}>${o.l}</option>`).join("")}
       </select></label>`;
   }
-  return `<label class="rule-row ${editable ? "cursor-pointer" : ""}">
+  return `<label class="rule-row ${val ? "rule-on" : ""} ${editable ? "cursor-pointer" : ""}">
     <input type="checkbox" ${val ? "checked" : ""} ${dis} onchange="setRule('${rule.key}','${g}', this.checked)" class="rule-check" />
     <span class="flex-1"><span class="rule-label">${rule.label}</span>
     ${rule.desc ? `<span class="rule-desc">${rule.desc}</span>` : ""}</span></label>`;
 }
+// ゲーム中に現在のルールを確認するための重ね表示
+function gameRulesOverlay() {
+  if (!state.showGameRules) return "";
+  return `<div class="overlay" onclick="toggleGameRules()">
+    <div class="overlay-body" onclick="event.stopPropagation()">
+      <div class="overlay-head"><span>現在のルール</span>
+        <button onclick="toggleGameRules()" class="btn-sub px-3 py-1 rounded-lg text-xs">閉じる</button></div>
+      ${rulesPanel(false)}
+    </div></div>`;
+}
 function rulesPanel(editable) {
   const rules = editable ? state.draftRules : state.room.rules;
+  const activeId = activePresetId(rules);
   return `<div class="panel rounded-xl p-3 mb-3 text-left">
     ${editable ? `<div class="mb-3">
-      <p class="t-dim text-xs mb-2">プリセット（まとめて設定）</p>
+      <div class="preset-head">
+        <span class="t-dim text-xs">プリセット</span>
+        <span class="preset-now">${activeId
+          ? `適用中：${esc((allPresets().find((p) => p.id === activeId) || {}).label || "")}`
+          : "カスタム設定（プリセットと不一致）"}</span>
+      </div>
       <div class="grid grid-cols-2 gap-2">
-        ${PRESETS.map((p) => `<button onclick="applyPreset('${p.id}')" class="btn-sub py-2 px-2 rounded-lg text-xs text-left">
-          <span class="block font-bold">${p.label}</span><span class="t-dim block text-[10px] leading-tight mt-0.5">${p.desc}</span></button>`).join("")}
-      </div></div>` : `<p class="t-dim text-xs mb-2">ホストが設定したルール（閲覧のみ）</p>`}
+        ${allPresets().map((p) => `<button onclick="applyPreset('${p.id}')" class="btn-sub preset ${p.id === activeId ? "preset-on" : ""} py-2 px-2 rounded-lg text-xs text-left">
+          ${p.id === activeId ? '<span class="preset-check">✓</span>' : ""}
+          ${p.custom ? `<span class="preset-del" onclick="event.stopPropagation();deletePreset('${p.id}')">×</span>` : ""}
+          <span class="block font-bold">${esc(p.label)}</span>
+          <span class="t-dim block text-[10px] leading-tight mt-0.5">${esc(p.desc || "")}</span></button>`).join("")}
+      </div>
+      <div class="preset-save">
+        <input id="preset-name" placeholder="この設定に名前を付けて保存" class="inp flex-1 rounded px-2 py-1 text-xs" />
+        <button onclick="saveAsPreset()" class="btn-sub px-3 py-1 rounded text-xs font-bold">保存</button>
+      </div>
+      <p class="t-dim text-[10px] mt-1">保存した設定はこの端末に残り、次回もここから選べます</p>
+    </div>` : `<p class="t-dim text-xs mb-2">ホストが設定したルール（閲覧のみ）</p>`}
     ${RULE_CATEGORIES.map((cat) => {
       const open = state.openCat === cat.id;
       const onCount = cat.rules.filter((r) => r.type === "bool" && (r.group === "forbidden" ? rules.forbidden[r.key] : rules[r.key])).length;
@@ -230,7 +324,10 @@ function rulesPanel(editable) {
 }
 
 // ---------- 画面 ----------
-function render() {
+// 描画したあとに手札の重なりを実測で調整する（paint は途中で return するので外側で呼ぶ）
+// rAF でもう一度測るのは、描画直後だと幅がまだ確定していないことがあるため
+function render() { paint(); layoutHand(); requestAnimationFrame(layoutHand); }
+function paint() {
   const app = document.getElementById("app");
 
   if (state.screen === "home") {
@@ -240,11 +337,17 @@ function render() {
         <h1 class="title">大富豪</h1>
         <p class="t-dim text-center text-sm mb-6">友達とオンライン対戦</p>
         <label class="block t-dim text-sm mb-1">名前</label>
-        <input id="name-input" value="${esc(state.name)}" placeholder="例）コヤネ" class="inp w-full mb-4 px-3 py-2 rounded-lg" />
+        <input id="name-input" value="${esc(state.name)}" placeholder="あなたの名前を入力" class="inp w-full mb-4 px-3 py-2 rounded-lg" />
         <button onclick="createRoom()" class="btn-play w-full py-3 rounded-lg font-bold mb-3">部屋を作る</button>
         <div class="divider"><span>または</span></div>
         <input id="code-input" placeholder="部屋コード" maxlength="4" class="inp w-full mb-3 px-3 py-2 rounded-lg tracking-widest text-center uppercase" />
         <button onclick="joinRoom()" class="btn-sub w-full py-3 rounded-lg font-bold">部屋に参加する</button>
+        ${IS_DEV ? `<div class="devbox mt-4">
+          <p class="dev-t">開発者メニュー</p>
+          <button onclick="devEnter()" class="btn-sub w-full py-2 rounded-lg font-bold text-sm">開発部屋に入る</button>
+          <p class="dev-note">部屋コードなしで固定の部屋「${DEV_CODE}」に直行します。
+          無ければその場で作られ、すでにあれば参加します。名前が空なら「開発者」になります。</p>
+        </div>` : ""}
         ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
       </div></div>`;
     return;
@@ -260,7 +363,10 @@ function render() {
     const testOn = effTestMode();
     const minPlayers = testOn ? 2 : 3;
     app.innerHTML = `<div class="min-h-screen p-4"><div class="max-w-sm mx-auto">
-      <div class="flex justify-end mb-2">${nightBtn()}</div>
+      <div class="flex justify-between items-center mb-2">
+        <button onclick="leaveRoom()" class="btn-sub px-3 py-1 rounded-lg text-xs">← 戻る</button>
+        ${nightBtn()}
+      </div>
       <h2 class="t-accent text-center text-sm mb-1">部屋コード</h2>
       <div class="roomcode">${r.code}</div>
       <p class="t-dim text-center text-xs mb-5">友達にこのコードを伝えてください</p>
@@ -317,70 +423,84 @@ function render() {
       const task = r.exchangeNeeded[0];
       const mine = task && (isTest || task.upperId === state.playerId);
       app.innerHTML = `<div class="min-h-screen p-4 flex flex-col">
-        <div class="flex justify-between items-center mb-3"><span class="t-dim text-xs">カード交換</span>${nightBtn()}</div>
+        <div class="flex justify-between items-center mb-3"><span class="t-dim text-xs">カード交換</span>
+          <span class="flex gap-2 items-center">
+            <button onclick="toggleGameRules()" class="btn-sub px-3 py-1 rounded-lg text-xs">ルール</button>${nightBtn()}
+          </span></div>
         <div class="panel rounded-xl p-4 mb-3 text-center">
           <p class="t-main text-sm">${mine ? `${esc(act.name)} は下位に返すカードを <b>${task.n}枚</b> 選んでください` : "他のプレイヤーが交換中…"}</p>
         </div>
         ${mine ? `<div class="panel p-3 mt-auto">
-          <div class="hand-row">${hand.map((c) => cardFace(c, state.selected.some((s) => s.id === c.id), true, false)).join("")}</div>
+          ${handRow(hand)}
           ${state.error ? `<p class="err text-xs mb-2 text-center">${esc(state.error)}</p>` : ""}
           <button onclick="submitExchange()" class="btn-play w-full py-3 rounded-lg font-bold">${state.selected.length}/${task.n} 枚を渡す</button>
-        </div>` : ""}</div>`;
+        </div>` : ""}${gameRulesOverlay()}</div>`;
       return;
     }
 
-    // 保留アクション（7渡し / 10捨て / Qボンバー）
-    let pendingUI = "";
+    // 保留アクション（7渡し / 10捨て / Qボンバー）は通常と違う操作なので、
+    // 見落とさないようポップアップで出す。
+    // ・Qボンバー … 数字を選ぶだけなので中央のモーダル（画面を塞いでよい）
+    // ・7渡し/10捨て … 手札から選ぶ必要があるので、手札のすぐ上に浮かせる
+    //   （画面を塞ぐモーダルにすると札を選べなくなる）
+    let popFloat = "", popModal = "";
     if (r.pending) {
       const pl = r.players.find((p) => p.id === r.pending.playerId);
       const mine = isTest || r.pending.playerId === state.playerId;
+      const waiting = `<p class="t-dim text-sm text-center mt-2">${esc(pl.name)} を待っています…</p>`;
       if (r.pending.type === "bomber") {
-        pendingUI = `<div class="pending">
-          <p class="pending-t">${esc(pl.name)}：捨てさせる数字を選んでください（Qボンバー）</p>
-          ${mine ? `<div class="flex flex-wrap gap-1 justify-center mt-2">
-            ${PICK_RANKS.map((rk) => `<button onclick="submitBomber(${rk})" class="btn-sub px-3 py-2 rounded text-sm font-bold">${RANK_LABEL(rk)}</button>`).join("")}
-          </div>` : `<p class="t-dim text-xs text-center mt-1">待っています…</p>`}</div>`;
+        popModal = `<div class="overlay overlay-center"><div class="overlay-body">
+          <p class="pop-t">Qボンバー</p>
+          <p class="pop-d">${esc(pl.name)} が、全員に捨てさせる数字を選びます</p>
+          ${mine ? `<div class="flex flex-wrap gap-1 justify-center mt-3">
+            ${PICK_RANKS.map((rk) => `<button onclick="submitBomber(${rk})" class="btn-sub px-3 py-2 rounded font-bold" style="min-width:46px">${RANK_LABEL(rk)}</button>`).join("")}
+          </div>` : waiting}</div></div>`;
       } else {
-        const lbl = r.pending.type === "give" ? "次の人に渡す" : "捨てる";
-        pendingUI = `<div class="pending">
-          <p class="pending-t">${esc(pl.name)}：${r.pending.count}枚を${lbl}（${r.pending.type === "give" ? "7渡し" : "10捨て"}）</p>
-          ${mine ? `<button onclick="submitPending()" class="btn-play w-full mt-2 py-2 rounded-lg font-bold text-sm">${state.selected.length}/${r.pending.count} 枚を${lbl}</button>`
-            : `<p class="t-dim text-xs text-center mt-1">待っています…</p>`}</div>`;
+        const give = r.pending.type === "give";
+        const lbl = give ? "次の人に渡す" : "捨てる";
+        popFloat = `<div class="pop-above">
+          <p class="pop-t">${give ? "7渡し" : "10捨て"}</p>
+          <p class="pop-d">${esc(pl.name)} が手札から ${r.pending.count}枚 を${lbl}</p>
+          ${mine ? `<button onclick="submitPending()" class="btn-play w-full mt-2 py-2 rounded-lg font-bold">${state.selected.length}/${r.pending.count} 枚を${lbl}</button>`
+            : waiting}</div>`;
       }
     }
 
-    const dirIcon = r.direction === 1 ? "↻" : "↺";
     app.innerHTML = `<div class="min-h-screen flex flex-col">
       <div class="topbar">
         <span>部屋 ${r.code}${isTest ? ' <b class="err">TEST</b>' : ""}</span>
         <span class="flex gap-2 items-center">
-          ${r.revolution ? '<span class="chip chip-rev">革命</span>' : ""}
-          ${r.tempReverse ? '<span class="chip chip-rev">反転</span>' : ""}
-          ${r.suitLockActive ? `<span class="chip chip-lock">縛${SUIT_SYMBOL[r.suitLockActive]}</span>` : ""}
-          ${r.numberLockActive != null ? `<span class="chip chip-lock">数${RANK_LABEL(r.numberLockActive)}</span>` : ""}
-          <span class="chip">${dirIcon}</span>${nightBtn()}
+          <button onclick="toggleGameRules()" class="btn-sub px-3 py-1 rounded-lg text-sm">ルール</button>
+          ${nightBtn()}
         </span>
+      </div>
+      <div class="status">
+        ${r.revolution ? '<span class="chip chip-rev" title="カードの強弱が逆転しています">革命中（強弱が逆）</span>' : ""}
+        ${r.tempReverse ? '<span class="chip chip-rev" title="場が流れるまで強弱が逆になります">一時反転（場が流れるまで）</span>' : ""}
+        ${r.suitLockActive ? `<span class="chip chip-lock" title="このスートしか出せません">${SUIT_SYMBOL[r.suitLockActive]} のみ（スート縛り）</span>` : ""}
+        ${r.numberLockActive != null ? `<span class="chip chip-lock" title="この数字しか出せません">${RANK_LABEL(r.numberLockActive)} のみ（数縛り）</span>` : ""}
+        <span class="chip" title="手番が回る向き。9リバース・12リバースで反転します">${
+          r.direction === 1 ? "↻ 順回り" : "↺ 逆回り"}</span>
       </div>
       <div class="players">${others.map((p) => `<div class="pcard ${r.order[r.currentTurnIndex] === p.id ? "turn" : ""}">
         <div class="pname">${esc(p.name)}${p.isCPU ? '<span class="tag-cpu">CPU</span>' : ""}${p.isDummy ? '<span class="tag-dummy">手動</span>' : ""}</div>
         <div class="t-dim text-xs">${p.finished ? "あがり" : `残${p.handCount}枚`}</div>
-        ${isTest && p.hand ? `<div class="mini-row">${miniHand(p.hand, rev)}</div>` : ""}
       </div>`).join("")}</div>
-      <div class="field">${fieldDisplay(r.field)}</div>
+      <div class="field ${rev ? "rev" : ""}">${fieldDisplay(r)}</div>
       <div class="logline">${esc(r.log[r.log.length - 1] || "")}</div>
       <div class="turnline ${canAct ? "t-accent" : "t-dim"}">
         ${isTest ? `操作中：${esc(act.name)}${act.isCPU ? "（CPU思考中…）" : ""}` : canAct ? "あなたの番です" : `${esc((r.players.find((p) => p.id === r.order[r.currentTurnIndex]) || {}).name || "")} の番`}
       </div>
-      <div class="panel p-3">
-        ${pendingUI}
+      <div class="panel p-3 panel-bottom">
+        ${popFloat}
         ${isTest ? `<p class="t-dim text-xs mb-1 text-center">${esc(act.name)} の手札</p>` : ""}
-        <div class="hand-row">${hand.map((c) => cardFace(c, state.selected.some((s) => s.id === c.id), true, false)).join("")}</div>
+        ${handRow(hand)}
         ${state.error ? `<p class="err text-xs mb-2 text-center">${esc(state.error)}</p>` : ""}
         ${r.pending ? "" : `<div class="flex gap-2">
-          <button onclick="submitPass()" ${!canAct || !r.field ? "disabled" : ""} class="btn-pass rounded-lg font-bold" style="flex:3 1 0%">パス</button>
-          <button onclick="submitPlay()" ${!canAct ? "disabled" : ""} class="btn-play rounded-lg font-bold" style="flex:7 1 0%">出す</button>
+          <button onclick="submitPass()" ${!canAct || !r.field ? "disabled" : ""} class="btn-pass rounded-lg font-bold" style="flex:4 1 0%">パス</button>
+          <button onclick="submitPlay()" ${!canAct ? "disabled" : ""} class="btn-play rounded-lg font-bold" style="flex:6 1 0%">出す</button>
         </div>`}
-      </div></div>`;
+      </div>${popModal}${gameRulesOverlay()}</div>`;
     return;
   }
 

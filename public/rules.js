@@ -10,7 +10,7 @@ export const RULE_CATEGORIES = [
     id: "basic",
     label: "1. 基本設定",
     rules: [
-      { key: "jokerCount", label: "ジョーカー枚数", desc: "単体最強のカード", type: "select", default: 2,
+      { key: "jokerCount", label: "ジョーカー枚数", desc: "単体最強のカード", type: "select", default: 1,
         options: [{ v: 0, l: "0枚" }, { v: 1, l: "1枚" }, { v: 2, l: "2枚" }] },
       { key: "jokerSubstitute", label: "Joker代用", desc: "ペア・階段などの不足札の代わりに使える", type: "bool", default: true },
       { key: "passRestriction", label: "パス制限あり", desc: "一度パスすると場が流れるまで出せない", type: "bool", default: true },
@@ -142,6 +142,26 @@ export function buildDefaultRules() {
   return out;
 }
 
+// --- プリセットを適用したときの、完全なルール一式を作る ---
+export function presetRules(preset) {
+  const base = buildDefaultRules();
+  return { ...base, ...preset.apply, forbidden: { ...base.forbidden, ...(preset.apply.forbidden || {}) } };
+}
+
+// --- ルール一式が同じ内容かを比べる（カタログにあるキーだけを見る）---
+// select の値は数値と文字列が混ざりうるので String() で揃えてから比較する
+export function sameRules(a, b) {
+  if (!a || !b) return false;
+  for (const cat of RULE_CATEGORIES) {
+    for (const rule of cat.rules) {
+      const va = rule.group === "forbidden" ? (a.forbidden || {})[rule.key] : a[rule.key];
+      const vb = rule.group === "forbidden" ? (b.forbidden || {})[rule.key] : b[rule.key];
+      if (String(va) !== String(vb)) return false;
+    }
+  }
+  return true;
+}
+
 // --- プリセット（ワンタップでまとめて設定） ---
 export const PRESETS = [
   {
@@ -153,7 +173,7 @@ export const PRESETS = [
   {
     id: "standard", label: "標準（連盟五大ルール）", desc: "革命・8切り・都落ち・スート縛り・スペ3返し＋階段",
     apply: { revolution: true, eightCut: true, kaidan: true, suitLock: true, spade3Return: true,
-      miyakoOchi: true, jokerCount: 2, exchange: "normal",
+      miyakoOchi: true, jokerCount: 1, exchange: "normal",
       forbidden: { two: true, eight: true, joker: true, spade3: false } },
   },
   {

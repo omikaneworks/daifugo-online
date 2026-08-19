@@ -9,6 +9,8 @@ const RANK_LABEL = (r) => ({ 11: "J", 12: "Q", 13: "K", 14: "A", 15: "2", 16: "J
 const IS_RED = (s) => s === "H" || s === "D";
 // rules.startCard の「◯3を持つ人」指定と、そのスートの対応
 const START_SUIT = { diamond3: "D", spade3: "S", heart3: "H", club3: "C" };
+// 場に残して見せる直近の手の数（room.pile）
+const PILE_MAX = 3;
 
 const DEFAULT_RULES = buildDefaultRules();
 
@@ -87,17 +89,30 @@ export class DaifugoRoom {
     }
   }
 
+  // いま操作すべき人。テストモードではこの人の手札だけ見せる（ホストが代わりに打つため）
+  actingId() {
+    const r = this.room;
+    if (!r) return null;
+    if (r.pending) return r.pending.playerId;
+    if (r.status === "exchange" && r.exchangeNeeded && r.exchangeNeeded[0]) return r.exchangeNeeded[0].upperId;
+    if (r.order && r.order.length) return r.order[r.currentTurnIndex];
+    return null;
+  }
+
   sanitize(forPlayerId) {
     if (!this.room) return null;
-    if (this.room.testMode) return this.room;
+    // 自分の手札＋（テストモードなら）手番の人の手札だけ。それ以外は必ず伏せる
+    const acting = this.room.testMode ? this.actingId() : null;
     return {
       ...this.room,
-      players: this.room.players.map((p) => (p.id === forPlayerId ? p : { ...p, hand: undefined })),
+      players: this.room.players.map((p) =>
+        p.id === forPlayerId || (acting && p.id === acting) ? p : { ...p, hand: undefined }),
     };
   }
 
   clearField(r) {
     r.field = null;
+    r.pile = [];
     r.suitLockActive = null;
     r.colorLockActive = null;
     r.numberLockActive = null;
@@ -108,41 +123,81 @@ export class DaifugoRoom {
     r.passStreak = 0;
   }
 
+  newRoom(code, playerId, name) {
+    return {
+      code, status: "waiting", hostId: playerId, testMode: false,
+      players: [{ id: playerId, name, hand: [], handCount: 0, finished: false, finishOrder: null }],
+      order: [], seatOrder: null, field: null, direction: 1,
+      suitLockActive: null, colorLockActive: null, numberLockActive: null,
+      suitRunSuit: null, suitRunCount: 0,
+      lastPlayerId: null, currentTurnIndex: 0, passStreak: 0, passedPlayers: [],
+      revolution: false, tempReverse: false, revolutionLocked: false, foulSeq: 0,
+      pending: null, adv: null, discardPile: [], pile: [],
+      rules: JSON.parse(JSON.stringify(DEFAULT_RULES)),
+      classes: null, previousDaifugoId: null, demotedPlayerId: null,
+      exchangeNeeded: [], exchangeGiven: {},
+      log: [`${name} が部屋を作成しました`],
+    };
+  }
+
   // ---------- メッセージ処理 ----------
   async handleMessage(ws, msg) {
     const { type, playerId } = msg;
 
     if (type === "create") {
-      this.room = {
-        code: msg.code, status: "waiting", hostId: playerId, testMode: false,
-        players: [{ id: playerId, name: msg.name, hand: [], handCount: 0, finished: false, finishOrder: null }],
-        order: [], seatOrder: null, field: null, direction: 1,
-        suitLockActive: null, colorLockActive: null, numberLockActive: null,
-        suitRunSuit: null, suitRunCount: 0,
-        lastPlayerId: null, currentTurnIndex: 0, passStreak: 0, passedPlayers: [],
-        revolution: false, tempReverse: false, revolutionLocked: false, foulSeq: 0,
-        pending: null, adv: null, discardPile: [],
-        rules: JSON.parse(JSON.stringify(DEFAULT_RULES)),
-        classes: null, previousDaifugoId: null, demotedPlayerId: null,
-        exchangeNeeded: [], exchangeGiven: {},
-        log: [`${msg.name} が部屋を作成しました`],
-      };
+      this.room = this.newRoom(msg.code, playerId, msg.name);
       this.sessions.set(ws, playerId);
       await this.persistAndBroadcast();
       return;
     }
 
     await this.ensureLoaded();
+
+    // 開発用（?dev=1）：部屋コードを介さず決め打ちの部屋へ入る。
+    // 無ければその場で作り、あれば join と同じ扱いにする。
+    if (type === "enter" && !this.room) {
+      this.room = this.newRoom(msg.code, playerId, msg.name);
+      this.sessions.set(ws, playerId);
+      await this.persistAndBroadcast();
+      return;
+    }
+
     if (!this.room) { ws.send(JSON.stringify({ type: "error", message: "部屋が見つかりません" })); return; }
     const r = this.room;
 
-    if (type === "join") {
+    if (type === "join" || type === "enter") {
       this.sessions.set(ws, playerId);
       if (!r.players.some((p) => p.id === playerId)) {
         if (r.status !== "waiting") { ws.send(JSON.stringify({ type: "error", message: "すでにゲームが始まっています" })); return; }
         if (r.players.length >= 6) { ws.send(JSON.stringify({ type: "error", message: "満員です（最大6人）" })); return; }
         r.players.push({ id: playerId, name: msg.name, hand: [], handCount: 0, finished: false, finishOrder: null });
         r.log.push(`${msg.name} が参加しました`);
+      }
+      await this.persistAndBroadcast();
+      return;
+    }
+
+    // ロビーからスタート画面に戻る（席を抜ける）
+    if (type === "leave") {
+      if (r.status !== "waiting") {
+        ws.send(JSON.stringify({ type: "error", message: "ゲーム中は退出できません" }));
+        return;
+      }
+      const i = r.players.findIndex((p) => p.id === playerId);
+      if (i >= 0) r.log.push(`${r.players.splice(i, 1)[0].name} が退出しました`);
+      this.sessions.delete(ws);
+
+      // 人が一人もいなくなった部屋は残す意味がないので消す（CPU・ダミーだけの部屋も同様）
+      const humans = r.players.filter((p) => !p.isCPU && !p.isDummy);
+      if (humans.length === 0) {
+        this.room = null;
+        await this.state.storage.deleteAll();
+        return;
+      }
+      // ホストが抜けたら残っている人に引き継ぐ
+      if (r.hostId === playerId) {
+        r.hostId = humans[0].id;
+        r.log.push(`${humans[0].name} がホストになりました`);
       }
       await this.persistAndBroadcast();
       return;
@@ -287,7 +342,7 @@ export class DaifugoRoom {
     r.revolution = false;
     r.revolutionLocked = false;
     r.demotedPlayerId = null;
-    r.pending = null; r.adv = null; r.discardPile = [];
+    r.pending = null; r.adv = null; r.discardPile = []; r.pile = [];
     this.clearField(r);
 
     // 独占禁止法：大富豪に2/Jokerが4枚以上集中していたら再配布
@@ -580,6 +635,11 @@ export class DaifugoRoom {
       if (rules.agariNagashi) cut = true;
     }
 
+    // --- 出た札の履歴 ---
+    // 場が流れずに続いている間だけ溜める（clearField() で空になる）。
+    // 8切りのように出した瞬間に流れる手は、押し込んだ直後に消える＝正しい挙動。
+    r.pile = [...(r.pile || []), { cards, by: me.name }].slice(-PILE_MAX);
+
     // --- 場の更新 ---
     if (cut) {
       this.clearField(r);
@@ -829,6 +889,7 @@ export class DaifugoRoom {
     r.classes = newClasses;
     r.status = "finished";
     r.field = null;
+    r.pile = [];
     r.pending = null;
     return true;
   }
