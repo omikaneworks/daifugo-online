@@ -57,6 +57,8 @@ export class DaifugoRoom {
     this.state = state;
     this.env = env;
     this.sessions = new Map();
+    // 身内ルーム用。合言葉を通った接続だけがここに入る（ws → メンバー情報）
+    this.verified = new Map();
     this.room = null;
   }
 
@@ -66,18 +68,34 @@ export class DaifugoRoom {
 
   async fetch(request) {
     if (request.headers.get("Upgrade") !== "websocket") return new Response("Expected websocket", { status: 426 });
+    await this.ensureLoaded();
+
+    // このヘッダは Worker が合言葉を照合したときだけ付ける。DO には Worker からしか
+    // 到達できないので、付いていること自体が「合言葉を通った」証明になる。
+    // 中身に日本語（名前・部屋名）が入るので base64 で運ぶ。ヘッダに直接入れると仕様違反になる
+    const raw = request.headers.get("X-Daifugo-Member");
+    let member = null;
+    if (raw) {
+      try { member = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)))); }
+      catch { member = null; }
+    }
+
+    // 身内ルームと一般の部屋を混ぜない。取り違えるとどちらかの守りが外れる
+    if (this.room && this.room.private && !member) return new Response("Forbidden", { status: 403 });
+    if (member && this.room && !this.room.private) return new Response("Forbidden", { status: 403 });
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();
-    await this.ensureLoaded();
     this.sessions.set(server, null);
+    if (member) this.verified.set(server, member);
     server.addEventListener("message", async (evt) => {
       let msg;
       try { msg = JSON.parse(evt.data); } catch { return; }
       try { await this.handleMessage(server, msg); }
       catch (e) { server.send(JSON.stringify({ type: "error", message: "エラー: " + (e && e.message ? e.message : "不明") })); }
     });
-    server.addEventListener("close", () => this.sessions.delete(server));
+    server.addEventListener("close", () => { this.sessions.delete(server); this.verified.delete(server); });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -105,6 +123,9 @@ export class DaifugoRoom {
     const acting = this.room.testMode ? this.actingId() : null;
     return {
       ...this.room,
+      // 身内ルームでは席のIDをサーバーが決める（端末が名乗るIDは使わない）ので、
+      // 「あなたはこれ」を必ず添えて返す。これが無いと自分の手札もホスト権限も見つけられない
+      you: forPlayerId,
       players: this.room.players.map((p) =>
         p.id === forPlayerId || (acting && p.id === acting) ? p : { ...p, hand: undefined }),
     };
@@ -142,9 +163,15 @@ export class DaifugoRoom {
 
   // ---------- メッセージ処理 ----------
   async handleMessage(ws, msg) {
-    const { type, playerId } = msg;
+    // 身内ルームでは、ブラウザが自称する playerId を信用せず検証済みのIDを使う。
+    // 端末の localStorage を消しても同じ席に戻れる副次効果もある。
+    const v = this.verified.get(ws) || null;
+    const type = msg.type;
+    const playerId = v ? v.id : msg.playerId;
 
     if (type === "create") {
+      // 身内ルームは合言葉経由でしか生まれない。この経路で上書きさせない
+      if (v) { ws.send(JSON.stringify({ type: "error", message: "この部屋では使えません" })); return; }
       this.room = this.newRoom(msg.code, playerId, msg.name);
       this.sessions.set(ws, playerId);
       await this.persistAndBroadcast();
@@ -153,10 +180,12 @@ export class DaifugoRoom {
 
     await this.ensureLoaded();
 
-    // 開発用（?dev=1）：部屋コードを介さず決め打ちの部屋へ入る。
-    // 無ければその場で作り、あれば join と同じ扱いにする。
+    // 部屋が無ければその場で作る経路。通るのは次の2つだけ：
+    //  ・身内ルーム（合言葉を通った接続。部屋名は登録側が決めるので msg は使わない）
+    //  ・開発部屋（?dev=1 の決め打ちの部屋）
     if (type === "enter" && !this.room) {
-      this.room = this.newRoom(msg.code, playerId, msg.name);
+      this.room = v ? this.newRoom("", playerId, v.name) : this.newRoom(msg.code, playerId, msg.name);
+      if (v) { this.room.private = true; this.room.name = v.roomName; }
       this.sessions.set(ws, playerId);
       await this.persistAndBroadcast();
       return;
@@ -165,19 +194,29 @@ export class DaifugoRoom {
     if (!this.room) { ws.send(JSON.stringify({ type: "error", message: "部屋が見つかりません" })); return; }
     const r = this.room;
 
+    // 身内ルームは合言葉からしか到達できない。部屋コードを知られても入れないようにする。
+    // 逆に一般の部屋へ検証済み接続は来ない（fetch でも弾いているが、ここでも守る）
+    if (!!r.private !== !!v) { ws.send(JSON.stringify({ type: "error", message: "部屋が見つかりません" })); return; }
+
     if (type === "join" || type === "enter") {
       this.sessions.set(ws, playerId);
+      const myName = v ? v.name : msg.name;
       if (!r.players.some((p) => p.id === playerId)) {
         if (r.status !== "waiting") { ws.send(JSON.stringify({ type: "error", message: "すでにゲームが始まっています" })); return; }
         if (r.players.length >= 6) { ws.send(JSON.stringify({ type: "error", message: "満員です（最大6人）" })); return; }
-        r.players.push({ id: playerId, name: msg.name, hand: [], handCount: 0, finished: false, finishOrder: null });
-        r.log.push(`${msg.name} が参加しました`);
+        r.players.push({ id: playerId, name: myName, hand: [], handCount: 0, finished: false, finishOrder: null });
+        r.log.push(`${myName} が参加しました`);
       }
       // ホストが繋がっていない部屋は中断も解散も誰にもできなくなる。
       // 放置された部屋を自力で片付けられるよう、入ってきた人にホストを渡す。
       if (![...this.sessions.values()].includes(r.hostId)) {
         r.hostId = playerId;
-        r.log.push(`${msg.name} がホストになりました`);
+        r.log.push(`${myName} がホストになりました`);
+      }
+      // 身内ルームは、ロビー中にオーナーが来たらホストをオーナーに戻す
+      if (v && v.owner && r.status === "waiting" && r.hostId !== playerId) {
+        r.hostId = playerId;
+        r.log.push(`${myName} がホストになりました`);
       }
       await this.persistAndBroadcast();
       return;
@@ -206,6 +245,8 @@ export class DaifugoRoom {
     // 部屋ごと消す（ホストのみ）。全員がスタート画面に戻る
     if (type === "disband") {
       if (r.hostId !== playerId) { ws.send(JSON.stringify({ type: "error", message: "ホストだけが操作できます" })); return; }
+      // 身内ルームは常設。消すのは管理画面からだけにする（間違って消すと合言葉ごと作り直し）
+      if (r.private) { ws.send(JSON.stringify({ type: "error", message: "この部屋は解散できません（中断ならロビーに戻せます）" })); return; }
       for (const [sock] of this.sessions.entries()) {
         try { sock.send(JSON.stringify({ type: "disbanded" })); } catch {}
       }
@@ -225,15 +266,17 @@ export class DaifugoRoom {
       if (i >= 0) r.log.push(`${r.players.splice(i, 1)[0].name} が退出しました`);
       this.sessions.delete(ws);
 
-      // 人が一人もいなくなった部屋は残す意味がないので消す（CPU・ダミーだけの部屋も同様）
+      // 人が一人もいなくなった部屋は残す意味がないので消す（CPU・ダミーだけの部屋も同様）。
+      // ただし身内ルームは常設なので消さない。ここが「翌日また同じ部屋に集まれる」の要
       const humans = r.players.filter((p) => !p.isCPU && !p.isDummy);
       if (humans.length === 0) {
-        this.room = null;
-        await this.state.storage.deleteAll();
-        return;
-      }
-      // ホストが抜けたら残っている人に引き継ぐ
-      if (r.hostId === playerId) {
+        if (!r.private) {
+          this.room = null;
+          await this.state.storage.deleteAll();
+          return;
+        }
+      } else if (r.hostId === playerId) {
+        // ホストが抜けたら残っている人に引き継ぐ
         r.hostId = humans[0].id;
         r.log.push(`${humans[0].name} がホストになりました`);
       }
@@ -1040,14 +1083,242 @@ export class DaifugoRoom {
   }
 }
 
+// ============ 身内ルーム（合言葉モード） ============
+// 合言葉と部屋の対応表を持つ Durable Object。インスタンスは1つだけ（idFromName("registry")）。
+// 合言葉はここから外へ出さない。ブラウザに返すのは「通行証・部屋名・自分の名前」だけで、
+// 部屋コードは渡さない（渡すと通常の「部屋コードで参加」から入れてしまい、合言葉が無意味になる）。
+
+const TICKET_TTL_MS = 60 * 1000;   // 通行証の有効期間
+const FAIL_LIMIT = 5;              // ここまで間違えたら待たせる
+const FAIL_BASE_MS = 60 * 1000;    // 待ち時間の基準（以降は倍々。上限あり）
+const FAIL_MAX_STEP = 6;
+const FAIL_RESET_MS = 60 * 60 * 1000; // これだけ間が空いたら回数を数え直す
+
+const jsonRes = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json" } });
+
+// 一致するまでの時間で中身を推測されないよう、必ず最後まで比較する
+function safeEqual(a, b) {
+  const enc = new TextEncoder();
+  const x = enc.encode(String(a == null ? "" : a));
+  const y = enc.encode(String(b == null ? "" : b));
+  let diff = x.length ^ y.length;
+  const n = Math.max(x.length, y.length);
+  for (let i = 0; i < n; i++) diff |= (x[i] || 0) ^ (y[i] || 0);
+  return diff === 0;
+}
+
+// 紛らわしい文字（l/I/1・o/O/0）を除いた32種。256 が 32 で割り切れるので偏りは出ない
+const ID_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789";
+function randomId(len) {
+  const buf = crypto.getRandomValues(new Uint8Array(len));
+  return Array.from(buf, (b) => ID_ALPHABET[b % 32]).join("");
+}
+function randomInt(max) {
+  return crypto.getRandomValues(new Uint32Array(1))[0] % max;
+}
+
+// 口で伝えられて、聞き間違えにくい合言葉を作る
+const PASS_WORDS = [
+  "sakura", "momiji", "kaede", "tsubaki", "hotaru", "kasumi", "shinju", "kogane",
+  "suzuran", "yamabuki", "asagiri", "yuuhi", "hatsuyuki", "mikazuki", "amanogawa", "komorebi",
+  "shiokaze", "harukaze", "natsugumo", "akatsuki", "yozora", "tsukikage", "hanabi", "wakaba",
+  "kaminari", "midori", "kohaku", "ruriiro", "ayame", "nadeshiko", "himawari", "rindou",
+];
+function makePass() {
+  const w = () => PASS_WORDS[randomInt(PASS_WORDS.length)];
+  return `${w()}-${w()}-${1000 + randomInt(9000)}`;
+}
+
+export class PrivateRegistry {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.data = null;
+  }
+
+  async load() {
+    if (!this.data) this.data = (await this.state.storage.get("data")) || { rooms: [] };
+    return this.data;
+  }
+  async save() { await this.state.storage.put("data", this.data); }
+
+  // ---- 総当たり対策：同じ相手が続けて外したら待たせる ----
+  async waitSec(key) {
+    const fails = (await this.state.storage.get("fails")) || {};
+    const f = fails[key];
+    if (!f || !f.until || f.until < Date.now()) return 0;
+    return Math.ceil((f.until - Date.now()) / 1000);
+  }
+  async addFail(key) {
+    const fails = (await this.state.storage.get("fails")) || {};
+    const now = Date.now();
+    // 掃除の基準は「最後に外した時刻」。待ち時間(until)で見ると、
+    // まだ待たせる前（until=0）の記録まで消えてしまい、回数がいつまでも溜まらない
+    for (const k of Object.keys(fails)) if ((fails[k].at || 0) < now - 86400000) delete fails[k];
+    // しばらく間が空いていれば数え直す（ふだん使いの人が積み重ねで締め出されないように）
+    const prev = fails[key];
+    const f = prev && now - (prev.at || 0) < FAIL_RESET_MS ? prev : { n: 0, until: 0 };
+    f.n += 1;
+    f.at = now;
+    if (f.n >= FAIL_LIMIT) f.until = now + FAIL_BASE_MS * 2 ** Math.min(f.n - FAIL_LIMIT, FAIL_MAX_STEP);
+    fails[key] = f;
+    await this.state.storage.put("fails", fails);
+  }
+  async clearFail(key) {
+    const fails = (await this.state.storage.get("fails")) || {};
+    if (fails[key]) { delete fails[key]; await this.state.storage.put("fails", fails); }
+  }
+
+  // ---- 通行証：60秒・1回きり ----
+  async issueTicket(roomId, member) {
+    const tickets = (await this.state.storage.get("tickets")) || {};
+    const now = Date.now();
+    for (const k of Object.keys(tickets)) if (tickets[k].exp < now) delete tickets[k];
+    const ticket = randomId(32);
+    tickets[ticket] = { roomId, member, exp: now + TICKET_TTL_MS };
+    await this.state.storage.put("tickets", tickets);
+    return ticket;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const ip = request.headers.get("CF-Connecting-IP") || "local";
+    let body = {};
+    try { body = await request.json(); } catch { body = {}; }
+
+    if (url.pathname === "/api/gate") return this.gate(body, ip);
+    if (url.pathname === "/api/admin") return this.admin(body, ip);
+    if (url.pathname === "/claim") return this.claim(body); // Worker からだけ呼ばれる
+    return new Response("Not found", { status: 404 });
+  }
+
+  // 合言葉 → 通行証
+  async gate(body, ip) {
+    const wait = await this.waitSec(ip);
+    if (wait > 0) return jsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
+
+    const pass = String(body.pass || "").trim();
+    const d = await this.load();
+    let hit = null;
+    // 見つかっても打ち切らない（当たりの位置が応答時間で漏れないように）
+    for (const room of d.rooms) for (const mb of room.members) if (safeEqual(mb.pass, pass)) hit = { room, mb };
+
+    if (!hit || hit.mb.disabled) {
+      await this.addFail(ip);
+      return jsonRes({ ok: false, error: hit ? "この合言葉は停止されています" : "合言葉が違います" });
+    }
+    await this.clearFail(ip);
+    hit.mb.lastUsedAt = Date.now();
+    await this.save();
+
+    const member = { id: hit.mb.id, name: hit.mb.name, owner: !!hit.mb.owner, roomName: hit.room.name };
+    const ticket = await this.issueTicket(hit.room.id, member);
+    // 部屋コード（roomId）は返さない
+    return jsonRes({ ok: true, ticket, roomName: hit.room.name, memberName: hit.mb.name });
+  }
+
+  // 通行証 → 部屋。使ったら即消す
+  async claim(body) {
+    const ticket = String(body.ticket || "");
+    const tickets = (await this.state.storage.get("tickets")) || {};
+    const t = tickets[ticket];
+    if (t) { delete tickets[ticket]; await this.state.storage.put("tickets", tickets); }
+    if (!t || t.exp < Date.now()) return jsonRes({ ok: false });
+    return jsonRes({ ok: true, roomId: t.roomId, member: t.member });
+  }
+
+  // ---- 管理（マスターキーが要る） ----
+  async admin(body, ip) {
+    const key = "admin:" + ip;
+    const wait = await this.waitSec(key);
+    if (wait > 0) return jsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
+
+    const master = this.env.DAIFUGO_MASTER_KEY;
+    if (!master) return jsonRes({ ok: false, error: "管理キーが未設定です（wrangler secret put DAIFUGO_MASTER_KEY）" });
+    if (!safeEqual(master, body.key)) {
+      await this.addFail(key);
+      return jsonRes({ ok: false, error: "管理キーが違います" });
+    }
+    await this.clearFail(key);
+
+    const d = await this.load();
+    const room = () => d.rooms.find((x) => x.id === body.roomId);
+    const member = () => { const r = room(); return r && r.members.find((m) => m.id === body.memberId); };
+    // 合言葉は全部屋を通して重複させない（重複すると行き先が定まらない）
+    const freshPass = () => {
+      const used = new Set(d.rooms.flatMap((r) => r.members.map((m) => m.pass)));
+      let p; do { p = makePass(); } while (used.has(p));
+      return p;
+    };
+
+    switch (body.action) {
+      case "list": break;
+      case "createRoom":
+        d.rooms.push({ id: randomId(12), name: String(body.name || "新しい部屋").slice(0, 20), members: [] });
+        break;
+      case "renameRoom": { const r = room(); if (r) r.name = String(body.name || r.name).slice(0, 20); break; }
+      case "deleteRoom": d.rooms = d.rooms.filter((x) => x.id !== body.roomId); break;
+      case "addMember": {
+        const r = room();
+        if (r) r.members.push({
+          id: "m-" + randomId(10), name: String(body.name || "名無し").slice(0, 12),
+          pass: freshPass(), owner: !!body.owner, disabled: false, lastUsedAt: null,
+        });
+        break;
+      }
+      case "renameMember": { const m = member(); if (m) m.name = String(body.name || m.name).slice(0, 12); break; }
+      case "regenPass": { const m = member(); if (m) m.pass = freshPass(); break; }
+      case "setDisabled": { const m = member(); if (m) m.disabled = !!body.disabled; break; }
+      case "deleteMember": { const r = room(); if (r) r.members = r.members.filter((m) => m.id !== body.memberId); break; }
+      // 間違え続けて待たされている人を、その場で解除する
+      case "clearLocks": await this.state.storage.put("fails", {}); break;
+      default: return jsonRes({ ok: false, error: "不明な操作です" });
+    }
+    await this.save();
+    return jsonRes({ ok: true, rooms: d.rooms });
+  }
+}
+
+const registry = (env) => env.PRIVATE.get(env.PRIVATE.idFromName("registry"));
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    // 一般の部屋（4文字コード）
     const m = url.pathname.match(/^\/api\/room\/([A-Za-z0-9]{4})\/ws$/);
     if (m) {
       const id = env.ROOM.idFromName(m[1].toUpperCase());
       return env.ROOM.get(id).fetch(request);
     }
+
+    // 合言葉の照合と管理。合言葉は body で受け取る（URLに載せると履歴やログに残る）
+    if (url.pathname === "/api/gate" || url.pathname === "/api/admin") {
+      if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+      return registry(env).fetch(request);
+    }
+
+    // 身内ルーム：通行証と引き換えに部屋へつなぐ。部屋コードはここから外に出ない
+    const t = url.pathname.match(/^\/api\/private\/([a-z0-9]{32})\/ws$/);
+    if (t) {
+      const res = await registry(env).fetch("https://registry/claim", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ticket: t[1] }),
+      });
+      const got = await res.json();
+      if (!got.ok) return new Response("Forbidden", { status: 403 });
+      // このヘッダを付けられるのは Worker だけ。部屋側はこれを合言葉の証明として扱う。
+      // 名前や部屋名が日本語なので base64 にしてから載せる
+      const headers = new Headers(request.headers);
+      const bytes = new TextEncoder().encode(JSON.stringify(got.member));
+      headers.set("X-Daifugo-Member", btoa(String.fromCharCode(...bytes)));
+      const id = env.ROOM.idFromName("priv:" + got.roomId);
+      return env.ROOM.get(id).fetch(request.url, { headers });
+    }
+
+    // 静的ファイルの配信は GET/HEAD だけ。本文つきの POST を流すと配信側が落ちる
+    if (request.method !== "GET" && request.method !== "HEAD") return new Response("Not found", { status: 404 });
     return env.ASSETS.fetch(request);
   },
 };

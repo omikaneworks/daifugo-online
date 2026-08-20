@@ -45,6 +45,9 @@ const state = {
   screen: "home", room: null, error: "", selected: [], ws: null,
   showRules: false, openCat: null, draftRules: null,
   testMode: false, showGameRules: false, menu: null, code: "",
+  // 身内ルーム（合言葉モード）。roomName は部屋コードの代わりに画面へ出す名前
+  // admin は管理画面に出す部屋一覧、adminKey は操作のたびに送るマスターキー（端末に残さない）
+  roomName: "", busy: false, admin: null, adminKey: "",
 };
 localStorage.setItem("daifugo-pid", state.playerId);
 
@@ -76,12 +79,24 @@ function actingId() {
   return state.playerId;
 }
 function connect(code, first) {
-  // 先に参照を外してから閉じる。そうしないと下の onclose が「切断」と誤判定する
-  if (state.ws) { const old = state.ws; state.ws = null; old.close(); }
   // 部屋の状態が来る前でも部屋コードを出せるように控えておく（固まったときの確認用）
   state.code = code;
+  state.roomName = "";
+  openSocket(`/api/room/${code}/ws`, first, `部屋 ${code} に接続できませんでした`, "home");
+}
+// 身内ルーム。合言葉と引き換えに受け取った通行証でつなぐ。
+// 部屋コードはサーバーから渡ってこないので、画面には部屋名を出す
+function connectPrivate(ticket, roomName) {
+  state.code = "";
+  state.roomName = roomName;
+  openSocket(`/api/private/${ticket}/ws`, { type: "enter" },
+    "部屋に入れませんでした。合言葉を入れ直してください", "gate");
+}
+function openSocket(path, first, failMsg, backTo) {
+  // 先に参照を外してから閉じる。そうしないと下の onclose が「切断」と誤判定する
+  if (state.ws) { const old = state.ws; state.ws = null; old.close(); }
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(`${proto}//${location.host}/api/room/${code}/ws`);
+  const ws = new WebSocket(`${proto}//${location.host}${path}`);
   // 返事が来るまでの間も部屋コードと脱出口を出しておく（ここで固まると何も分からなくなる）
   state.screen = "connecting";
   state.error = "";
@@ -91,14 +106,17 @@ function connect(code, first) {
     if (state.ws !== ws) return; // 自分で抜けたときは何もしない
     state.error = state.room
       ? "接続が切れました。タイトルに戻って入り直してください"
-      : `部屋 ${code} に接続できませんでした`;
-    if (!state.room) state.screen = "home";
+      : failMsg;
+    if (!state.room) state.screen = backTo;
     render();
   };
   ws.onmessage = (evt) => {
     const d = JSON.parse(evt.data);
     if (d.type === "state") {
       const prevActor = state.room ? actingId() : null;
+      // 身内ルームでは席のIDをサーバーが決めるので、名乗ったIDではなくサーバーの言う方に合わせる。
+      // 端末のID（daifugo-pid）は書き換えない。タイトルに戻ったときに戻す
+      if (d.room.you) state.playerId = d.room.you;
       state.room = d.room;
       state.error = "";
       if (!state.draftRules) state.draftRules = JSON.parse(JSON.stringify(d.room.rules));
@@ -119,6 +137,9 @@ function resetToTitle(message) {
   Object.assign(state, {
     ws: null, room: null, code: "", draftRules: null, selected: [], menu: null,
     showRules: false, openCat: null, testMode: false, showGameRules: false,
+    roomName: "", busy: false, admin: null, adminKey: "",
+    // 身内ルームで借りていた席のIDを、この端末のIDに戻す
+    playerId: localStorage.getItem("daifugo-pid") || state.playerId,
     error: message || "", screen: "home",
   });
   render();
@@ -141,6 +162,87 @@ W.joinRoom = () => {
   localStorage.setItem("daifugo-name", state.name);
   connect(code, { type: "join", playerId: state.playerId, name: state.name });
 };
+// ---------- 身内ルーム（合言葉モード） ----------
+// 合言葉はサーバーにしか無い。ここでは入力を送って通行証を受け取るだけで、
+// 部屋コードも部屋の一覧もブラウザには渡ってこない。
+const PASS_KEY = "daifugo-pass";
+const post = (path, body) =>
+  fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+    .then((r) => r.json())
+    .catch(() => ({ ok: false, error: "つながりませんでした。通信を確認してください" }));
+
+async function tryPass(pass, remember) {
+  state.busy = true; state.error = ""; render();
+  const d = await post("/api/gate", { pass });
+  state.busy = false;
+  if (!d.ok) { state.error = d.error || "合言葉が違います"; state.screen = "gate"; return render(); }
+  if (remember) localStorage.setItem(PASS_KEY, pass); else localStorage.removeItem(PASS_KEY);
+  connectPrivate(d.ticket, d.roomName);
+}
+// 隅の入口。合言葉を覚えている端末はそのまま入る（2回目以降は入力なし）
+W.openGate = () => {
+  const saved = localStorage.getItem(PASS_KEY);
+  if (saved) return tryPass(saved, true);
+  state.screen = "gate"; state.error = ""; render();
+};
+W.enterPass = () => {
+  const pass = (document.getElementById("pass-input").value || "").trim();
+  if (!pass) { state.error = "合言葉を入力してください"; return render(); }
+  tryPass(pass, document.getElementById("pass-remember").checked);
+};
+W.forgetPass = () => {
+  localStorage.removeItem(PASS_KEY);
+  state.menu = null;
+  resetToTitle("この端末から合言葉を消しました");
+};
+
+// 管理画面。マスターキーは端末に残さず、操作のたびに送る
+W.openAdmin = () => { state.screen = "admin"; state.admin = null; state.error = ""; render(); };
+async function adminCall(body) {
+  if (!state.adminKey) return;
+  state.busy = true; render();
+  const d = await post("/api/admin", { key: state.adminKey, ...body });
+  state.busy = false;
+  if (!d.ok) { state.error = d.error || "失敗しました"; state.admin = null; state.adminKey = ""; }
+  else { state.error = ""; state.admin = d.rooms; }
+  render();
+}
+W.adminLogin = () => {
+  state.adminKey = (document.getElementById("admin-key").value || "").trim();
+  if (!state.adminKey) { state.error = "管理キーを入力してください"; return render(); }
+  adminCall({ action: "list" });
+};
+W.adminAct = (action, roomId, memberId) => adminCall({ action, roomId, memberId });
+W.adminCreateRoom = () => {
+  const el = document.getElementById("new-room");
+  const name = (el.value || "").trim();
+  if (!name) { state.error = "部屋の名前を入力してください"; return render(); }
+  el.value = "";
+  adminCall({ action: "createRoom", name });
+};
+W.adminAddMember = (roomId) => {
+  const el = document.getElementById("new-member-" + roomId);
+  const name = (el.value || "").trim();
+  if (!name) { state.error = "名前を入力してください"; return render(); }
+  el.value = "";
+  adminCall({ action: "addMember", roomId, name, owner: document.getElementById("new-owner-" + roomId).checked });
+};
+W.adminToggle = (roomId, memberId, disabled) => adminCall({ action: "setDisabled", roomId, memberId, disabled });
+// 名前に引用符が入っても壊れないよう、合言葉そのものではなくIDを渡して引き当てる
+W.copyPass = (roomId, memberId) => {
+  const room = (state.admin || []).find((r) => r.id === roomId);
+  const m = room && room.members.find((x) => x.id === memberId);
+  if (!m) return;
+  navigator.clipboard.writeText(m.pass).then(
+    () => { state.error = `${m.name} の合言葉をコピーしました`; render(); },
+    () => { state.error = "コピーできませんでした。長押しで選択してください"; render(); });
+};
+// 消すものは取り返しがつかないので必ず一度止める
+W.adminAsk = (action, roomId, memberId) => { state.adminAsk = { action, roomId, memberId }; render(); };
+W.adminAskNo = () => { state.adminAsk = null; render(); };
+W.adminAskYes = () => { const a = state.adminAsk; state.adminAsk = null; adminCall(a); };
+W.resetToTitleBtn = () => resetToTitle();
+
 // 開発用：部屋コードのやり取りを省いて、決め打ちの部屋に直行する（?dev=1 のときだけ出る）
 const DEV_CODE = "DEV0";
 W.devEnter = () => {
@@ -227,6 +329,8 @@ W.submitExchange = () => {
 };
 
 // ---------- 描画パーツ ----------
+// 画面に出す部屋の呼び名。身内ルームは部屋コードを持たない（渡すと合言葉が意味を失う）ので名前を出す
+const roomLabel = (r) => (!r ? "" : r.private ? r.name || "身内ルーム" : r.code || "");
 function nightBtn() {
   return `<button onclick="toggleNight()" class="btn-sub px-3 py-1 rounded-lg text-sm">${state.night ? "☀︎" : "☾"}</button>`;
 }
@@ -337,12 +441,86 @@ function menuOverlay() {
       <button onclick="toggleMenu()" class="btn-sub px-3 py-1 rounded-lg text-sm">閉じる</button></div>
     <div class="menu-list">
       ${isHost && playing ? `<button onclick="toggleMenu('abort')" class="btn-sub menu-item">対戦を中断してロビーへ</button>` : ""}
-      ${isHost ? `<button onclick="toggleMenu('disband')" class="btn-sub menu-item">部屋を解散する</button>` : ""}
+      ${isHost && !(r && r.private) ? `<button onclick="toggleMenu('disband')" class="btn-sub menu-item">部屋を解散する</button>` : ""}
       <button onclick="leaveRoom()" class="btn-sub menu-item">タイトルに戻る</button>
+      ${r && r.private && localStorage.getItem(PASS_KEY)
+        ? `<button onclick="forgetPass()" class="btn-sub menu-item">合言葉をこの端末から消す</button>` : ""}
     </div>
-    <p class="dev-note">「タイトルに戻る」は自分だけが抜けます。同じ端末なら、同じ部屋コードで入り直せば席に戻れます。
-    ${isHost ? "" : "「中断」「解散」はホストだけが操作できます。"}</p>
+    <p class="dev-note">「タイトルに戻る」は自分だけが抜けます。${r && r.private
+      ? "同じ合言葉で入り直せば席に戻れます。身内ルームは解散できません（消すのは管理画面から）。"
+      : "同じ端末なら、同じ部屋コードで入り直せば席に戻れます。"}
+    ${isHost ? "" : "「中断」はホストだけが操作できます。"}</p>
   </div></div>`;
+}
+// 管理画面。ここに出る合言葉は、ヨコさんが相手に伝えるためのもの。
+// マスターキーは端末に保存せず、画面を閉じたら消える
+function adminScreen() {
+  if (!state.admin) {
+    return `<div class="min-h-screen flex items-center justify-center p-4">
+      <div class="w-full max-w-sm panel rounded-2xl p-6">
+        <h1 class="title">管理</h1>
+        <p class="t-dim text-center text-sm mb-6">身内ルームの合言葉を発行・停止します</p>
+        <input id="admin-key" type="password" autocomplete="off" placeholder="管理キー"
+          onkeydown="if(event.key==='Enter')adminLogin()" class="inp w-full mb-3 px-3 py-2 rounded-lg text-center" />
+        <button onclick="adminLogin()" ${state.busy ? "disabled" : ""}
+          class="btn-play w-full py-3 rounded-lg font-bold mb-3">${state.busy ? "確認中…" : "開く"}</button>
+        <button onclick="resetToTitleBtn()" class="btn-sub w-full py-2 rounded-lg text-sm">← タイトルに戻る</button>
+        ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
+      </div></div>`;
+  }
+  const ask = state.adminAsk;
+  const askBox = !ask ? "" : `<div class="overlay overlay-center"><div class="overlay-body">
+    <p class="pop-t">${ask.action === "deleteRoom" ? "部屋を削除しますか？" : "この人を削除しますか？"}</p>
+    <p class="pop-d">${ask.action === "deleteRoom"
+      ? "この部屋のメンバーと合言葉がすべて消えます。部屋の中の対戦状態も戻せません。"
+      : "この人の合言葉が消えます。もう一度入ってもらうには、追加し直して新しい合言葉を伝えることになります。"}</p>
+    <div class="flex gap-2 mt-4">
+      <button onclick="adminAskNo()" class="btn-sub rounded-lg py-3 font-bold" style="flex:1">やめる</button>
+      <button onclick="adminAskYes()" class="btn-play rounded-lg py-3 font-bold" style="flex:1">削除する</button>
+    </div></div></div>`;
+
+  return `<div class="min-h-screen p-4"><div class="max-w-lg mx-auto">
+    <div class="admin-head">
+      <h2 class="t-accent text-lg font-bold">身内ルーム管理</h2>
+      <span class="flex gap-2">${nightBtn()}
+        <button onclick="resetToTitleBtn()" class="btn-sub px-3 py-1 rounded-lg text-sm">閉じる</button></span>
+    </div>
+    ${state.error ? `<p class="err mb-3 text-center text-sm">${esc(state.error)}</p>` : ""}
+    ${state.admin.map((room) => `<div class="panel rounded-xl p-4 mb-3">
+      <div class="flex justify-between items-center mb-2">
+        <span class="t-main font-bold">${esc(room.name)}</span>
+        <button onclick="adminAsk('deleteRoom','${room.id}')" class="btn-sub px-2 py-1 rounded text-xs">部屋を削除</button>
+      </div>
+      ${room.members.length ? `<ul class="mb-3">${room.members.map((m) => `
+        <li class="mem-row ${m.disabled ? "mem-off" : ""}">
+          <span class="mem-name">${esc(m.name)}${m.owner ? '<span class="t-accent text-xs">ホスト</span>' : ""}
+            ${m.disabled ? '<span class="err text-xs">停止中</span>' : ""}</span>
+          <code class="mem-pass">${esc(m.pass)}</code>
+          <span class="mem-btns">
+            <button onclick="copyPass('${room.id}','${m.id}')" class="btn-sub">コピー</button>
+            <button onclick="adminAct('regenPass','${room.id}','${m.id}')" class="btn-sub">再発行</button>
+            <button onclick="adminToggle('${room.id}','${m.id}',${!m.disabled})" class="btn-sub">${m.disabled ? "再開" : "停止"}</button>
+            <button onclick="adminAsk('deleteMember','${room.id}','${m.id}')" class="btn-sub">削除</button>
+          </span>
+        </li>`).join("")}</ul>` : `<p class="t-dim text-sm mb-3">まだ誰も登録されていません</p>`}
+      <div class="mem-add">
+        <input id="new-member-${room.id}" placeholder="名前" class="inp px-2 py-1 rounded text-sm" />
+        <label class="t-dim text-xs flex items-center gap-1">
+          <input type="checkbox" id="new-owner-${room.id}" class="rule-check" />ホスト</label>
+        <button onclick="adminAddMember('${room.id}')" class="btn-sub px-3 py-1 rounded text-sm font-bold">追加</button>
+      </div>
+    </div>`).join("")}
+    <div class="panel rounded-xl p-4">
+      <p class="t-dim text-sm mb-2">新しい部屋を作る</p>
+      <div class="mem-add">
+        <input id="new-room" placeholder="部屋の名前（例：ゲーム付き合い）"
+          onkeydown="if(event.key==='Enter')adminCreateRoom()" class="inp px-2 py-1 rounded text-sm" />
+        <button onclick="adminCreateRoom()" class="btn-sub px-3 py-1 rounded text-sm font-bold">作る</button>
+      </div>
+    </div>
+    <p class="dev-note mt-3">合言葉は1人1本です。漏れたと思ったら「再発行」を押すと、その人の分だけ変わります
+    （他の人はそのまま遊べます）。「停止」は席を残したまま入れなくします。</p>
+  </div>${askBox}</div>`;
 }
 function rulesPanel(editable) {
   const rules = editable ? state.draftRules : state.room.rules;
@@ -412,15 +590,39 @@ function paint() {
           無ければその場で作られ、すでにあれば参加します。名前が空なら「開発者」になります。</p>
         </div>` : ""}
         ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
+      </div>
+      <button onclick="openGate()" class="corner-mark" title="身内用">♠</button></div>`;
+    return;
+  }
+
+  // 合言葉の入力。身内ルームはここからしか入れない
+  if (state.screen === "gate") {
+    app.innerHTML = `<div class="min-h-screen flex items-center justify-center p-4">
+      <div class="w-full max-w-sm panel rounded-2xl p-6">
+        <div class="flex justify-end mb-2">${nightBtn()}</div>
+        <h1 class="title">合言葉</h1>
+        <p class="t-dim text-center text-sm mb-6">伝えられた合言葉を入力してください</p>
+        <input id="pass-input" type="password" autocomplete="off" placeholder="合言葉"
+          onkeydown="if(event.key==='Enter')enterPass()" class="inp w-full mb-3 px-3 py-2 rounded-lg text-center" />
+        <label class="gate-remember"><input type="checkbox" id="pass-remember" checked class="rule-check" />
+          <span>この端末に覚えておく（次回から入力なしで入れます）</span></label>
+        <button onclick="enterPass()" ${state.busy ? "disabled" : ""}
+          class="btn-play w-full py-3 rounded-lg font-bold mb-3 mt-3">${state.busy ? "確認中…" : "入る"}</button>
+        <button onclick="resetToTitleBtn()" class="btn-sub w-full py-2 rounded-lg text-sm">← タイトルに戻る</button>
+        ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
+        <button onclick="openAdmin()" class="gate-admin">管理</button>
       </div></div>`;
     return;
   }
+
+  if (state.screen === "admin") { app.innerHTML = adminScreen(); return; }
 
   const r = state.room;
   // 接続待ちのまま返事が来ないこともあるので、ここにも部屋コードと脱出口を置く
   if (!r) {
     app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-3">
       ${state.code ? `<span class="t-dim text-sm">部屋コード</span><div class="roomcode">${esc(state.code)}</div>` : ""}
+      ${state.roomName ? `<span class="t-dim text-sm">身内ルーム</span><div class="roomname">${esc(state.roomName)}</div>` : ""}
       <span class="t-dim">接続中…</span>
       <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm mt-2">タイトルに戻る</button>
     </div>`;
@@ -438,9 +640,12 @@ function paint() {
         <button onclick="leaveRoom()" class="btn-sub px-3 py-1 rounded-lg text-xs">← 戻る</button>
         <span class="flex gap-2 items-center">${menuBtn()}${nightBtn()}</span>
       </div>
-      <h2 class="t-accent text-center text-sm mb-1">部屋コード</h2>
+      ${r.private ? `<h2 class="t-accent text-center text-sm mb-1">身内ルーム</h2>
+      <div class="roomname">${esc(r.name || "")}</div>
+      <p class="t-dim text-center text-xs mb-5">合言葉を持っている人だけが入れます</p>`
+      : `<h2 class="t-accent text-center text-sm mb-1">部屋コード</h2>
       <div class="roomcode">${r.code}</div>
-      <p class="t-dim text-center text-xs mb-5">友達にこのコードを伝えてください</p>
+      <p class="t-dim text-center text-xs mb-5">友達にこのコードを伝えてください</p>`}
       <div class="panel rounded-xl p-4 mb-3">
         <p class="t-dim text-sm mb-2">参加者（${r.players.length}/6）</p>
         <ul class="space-y-1">${r.players.map((p) => `<li class="flex items-center gap-2 t-main text-sm">
@@ -495,7 +700,7 @@ function paint() {
       const mine = task && (isTest || task.upperId === state.playerId);
       app.innerHTML = `<div class="min-h-screen p-4 flex flex-col">
         <div class="flex justify-between items-center mb-3">
-          <span class="flex gap-2 items-center">${menuBtn()}<span class="t-dim text-sm">部屋 ${r.code}・カード交換</span></span>
+          <span class="flex gap-2 items-center">${menuBtn()}<span class="t-dim text-sm">部屋 ${esc(roomLabel(r))}・カード交換</span></span>
           <span class="flex gap-2 items-center">
             <button onclick="toggleGameRules()" class="btn-sub px-3 py-1 rounded-lg text-xs">ルール</button>${nightBtn()}
           </span></div>
@@ -540,7 +745,7 @@ function paint() {
 
     app.innerHTML = `<div class="min-h-screen flex flex-col">
       <div class="topbar">
-        <span class="flex gap-2 items-center">${menuBtn()}部屋 ${r.code}${isTest ? ' <b class="err">TEST</b>' : ""}</span>
+        <span class="flex gap-2 items-center">${menuBtn()}部屋 ${esc(roomLabel(r))}${isTest ? ' <b class="err">TEST</b>' : ""}</span>
         <span class="flex gap-2 items-center">
           <button onclick="toggleGameRules()" class="btn-sub px-3 py-1 rounded-lg text-sm">ルール</button>
           ${nightBtn()}
@@ -580,7 +785,7 @@ function paint() {
     const ranked = [...r.players].sort((a, b) => (a.finishOrder || 99) - (b.finishOrder || 99));
     app.innerHTML = `<div class="min-h-screen p-4 flex flex-col items-center justify-center">
       <div class="w-full max-w-sm flex justify-between items-center mb-2">
-        <span class="flex gap-2 items-center">${menuBtn()}<span class="t-dim text-sm">部屋 ${r.code}</span></span>
+        <span class="flex gap-2 items-center">${menuBtn()}<span class="t-dim text-sm">部屋 ${esc(roomLabel(r))}</span></span>
         ${nightBtn()}
       </div>
       <h2 class="title mb-4">結果発表</h2>
@@ -603,7 +808,8 @@ function paint() {
 
   // どの画面にも当てはまらないとき（席が無くなった等）。真っ白のまま操作不能にしない
   app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-3">
-    ${r.code ? `<span class="t-dim text-sm">部屋コード</span><div class="roomcode">${esc(r.code)}</div>` : ""}
+    ${roomLabel(r) ? `<span class="t-dim text-sm">${r.private ? "身内ルーム" : "部屋コード"}</span>
+      <div class="${r.private ? "roomname" : "roomcode"}">${esc(roomLabel(r))}</div>` : ""}
     <span class="t-dim">この部屋の席がありません</span>
     <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm mt-2">タイトルに戻る</button>
   </div>`;
