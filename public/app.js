@@ -44,7 +44,7 @@ const state = {
   night: localStorage.getItem("daifugo-night") === "1",
   screen: "home", room: null, error: "", selected: [], ws: null,
   showRules: false, openCat: null, draftRules: null,
-  testMode: false, showGameRules: false, menu: null,
+  testMode: false, showGameRules: false, menu: null, code: "",
 };
 localStorage.setItem("daifugo-pid", state.playerId);
 
@@ -76,10 +76,25 @@ function actingId() {
   return state.playerId;
 }
 function connect(code, first) {
-  if (state.ws) state.ws.close();
+  // 先に参照を外してから閉じる。そうしないと下の onclose が「切断」と誤判定する
+  if (state.ws) { const old = state.ws; state.ws = null; old.close(); }
+  // 部屋の状態が来る前でも部屋コードを出せるように控えておく（固まったときの確認用）
+  state.code = code;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/api/room/${code}/ws`);
+  // 返事が来るまでの間も部屋コードと脱出口を出しておく（ここで固まると何も分からなくなる）
+  state.screen = "connecting";
+  state.error = "";
+  render();
   ws.onopen = () => ws.send(JSON.stringify(first));
+  ws.onclose = () => {
+    if (state.ws !== ws) return; // 自分で抜けたときは何もしない
+    state.error = state.room
+      ? "接続が切れました。タイトルに戻って入り直してください"
+      : `部屋 ${code} に接続できませんでした`;
+    if (!state.room) state.screen = "home";
+    render();
+  };
   ws.onmessage = (evt) => {
     const d = JSON.parse(evt.data);
     if (d.type === "state") {
@@ -102,7 +117,7 @@ function connect(code, first) {
 function resetToTitle(message) {
   if (state.ws) { try { state.ws.close(); } catch { /* 切れていれば何もしない */ } }
   Object.assign(state, {
-    ws: null, room: null, draftRules: null, selected: [], menu: null,
+    ws: null, room: null, code: "", draftRules: null, selected: [], menu: null,
     showRules: false, openCat: null, testMode: false, showGameRules: false,
     error: message || "", screen: "home",
   });
@@ -402,11 +417,12 @@ function paint() {
   }
 
   const r = state.room;
-  // 接続待ちのまま返事が来ないこともあるので、ここにも脱出口を置く
+  // 接続待ちのまま返事が来ないこともあるので、ここにも部屋コードと脱出口を置く
   if (!r) {
-    app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-4">
+    app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-3">
+      ${state.code ? `<span class="t-dim text-sm">部屋コード</span><div class="roomcode">${esc(state.code)}</div>` : ""}
       <span class="t-dim">接続中…</span>
-      <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm">タイトルに戻る</button>
+      <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm mt-2">タイトルに戻る</button>
     </div>`;
     return;
   }
@@ -479,7 +495,7 @@ function paint() {
       const mine = task && (isTest || task.upperId === state.playerId);
       app.innerHTML = `<div class="min-h-screen p-4 flex flex-col">
         <div class="flex justify-between items-center mb-3">
-          <span class="flex gap-2 items-center">${menuBtn()}<span class="t-dim text-xs">カード交換</span></span>
+          <span class="flex gap-2 items-center">${menuBtn()}<span class="t-dim text-sm">部屋 ${r.code}・カード交換</span></span>
           <span class="flex gap-2 items-center">
             <button onclick="toggleGameRules()" class="btn-sub px-3 py-1 rounded-lg text-xs">ルール</button>${nightBtn()}
           </span></div>
@@ -563,8 +579,11 @@ function paint() {
   if (state.screen === "finished") {
     const ranked = [...r.players].sort((a, b) => (a.finishOrder || 99) - (b.finishOrder || 99));
     app.innerHTML = `<div class="min-h-screen p-4 flex flex-col items-center justify-center">
-      <div class="w-full max-w-sm flex justify-between items-center mb-2">${menuBtn()}${nightBtn()}</div>
-      <h2 class="title mb-5">結果発表</h2>
+      <div class="w-full max-w-sm flex justify-between items-center mb-2">
+        <span class="flex gap-2 items-center">${menuBtn()}<span class="t-dim text-sm">部屋 ${r.code}</span></span>
+        ${nightBtn()}
+      </div>
+      <h2 class="title mb-4">結果発表</h2>
       <div class="w-full max-w-sm space-y-2 mb-5">
         ${ranked.map((p) => {
           const label = (r.classes && r.classes[p.id]) || "";
@@ -583,9 +602,10 @@ function paint() {
   }
 
   // どの画面にも当てはまらないとき（席が無くなった等）。真っ白のまま操作不能にしない
-  app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-4">
+  app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-3">
+    ${r.code ? `<span class="t-dim text-sm">部屋コード</span><div class="roomcode">${esc(r.code)}</div>` : ""}
     <span class="t-dim">この部屋の席がありません</span>
-    <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm">タイトルに戻る</button>
+    <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm mt-2">タイトルに戻る</button>
   </div>`;
 }
 
