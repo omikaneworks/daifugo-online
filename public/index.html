@@ -185,7 +185,12 @@ button:disabled{opacity:.3}
 .mem-pass{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9rem;
   color:var(--accent);word-break:break-all}
 .mem-btns{display:flex;gap:4px;flex-wrap:wrap;margin-top:2px}
-.mem-btns .btn-sub{padding:4px 9px;border-radius:6px;font-size:.75rem}
+/* 4つのボタンが狭い画面でも1行に収まる大きさ（折り返すと1人分が縦に伸びて一覧しづらい） */
+.mem-btns .btn-sub{padding:4px 7px;border-radius:6px;font-size:.72rem;white-space:nowrap}
+/* 部屋の見出し。名前は折り返してよいが、削除ボタンは折り返させない */
+.admin-room-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px}
+.admin-room-head .btn-sub{flex:0 0 auto;padding:4px 8px;border-radius:6px;font-size:.72rem;white-space:nowrap}
+.admin-room-name{font-weight:700;color:var(--text);line-height:1.35}
 /* 入力欄つきの1行（メンバー追加・部屋追加）。min-width:0 が無いと入力欄が縮まずはみ出す */
 .mem-add{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .mem-add .inp{flex:1 1 6em;min-width:0}

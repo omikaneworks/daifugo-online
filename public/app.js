@@ -47,7 +47,7 @@ const state = {
   testMode: false, showGameRules: false, menu: null, code: "",
   // 身内ルーム（合言葉モード）。roomName は部屋コードの代わりに画面へ出す名前
   // admin は管理画面に出す部屋一覧、adminKey は操作のたびに送るマスターキー（端末に残さない）
-  roomName: "", busy: false, admin: null, adminKey: "",
+  roomName: "", busy: false, admin: null, adminKey: "", passDraft: "",
 };
 localStorage.setItem("daifugo-pid", state.playerId);
 
@@ -137,7 +137,7 @@ function resetToTitle(message) {
   Object.assign(state, {
     ws: null, room: null, code: "", draftRules: null, selected: [], menu: null,
     showRules: false, openCat: null, testMode: false, showGameRules: false,
-    roomName: "", busy: false, admin: null, adminKey: "",
+    roomName: "", busy: false, admin: null, adminKey: "", passDraft: "",
     // 身内ルームで借りていた席のIDを、この端末のIDに戻す
     playerId: localStorage.getItem("daifugo-pid") || state.playerId,
     error: message || "", screen: "home",
@@ -176,6 +176,7 @@ async function tryPass(pass, remember) {
   const d = await post("/api/gate", { pass });
   state.busy = false;
   if (!d.ok) { state.error = d.error || "合言葉が違います"; state.screen = "gate"; return render(); }
+  state.passDraft = "";
   if (remember) localStorage.setItem(PASS_KEY, pass); else localStorage.removeItem(PASS_KEY);
   connectPrivate(d.ticket, d.roomName);
 }
@@ -187,6 +188,7 @@ W.openGate = () => {
 };
 W.enterPass = () => {
   const pass = (document.getElementById("pass-input").value || "").trim();
+  state.passDraft = pass; // 間違えたときに打ち直さなくて済むよう控えておく
   if (!pass) { state.error = "合言葉を入力してください"; return render(); }
   tryPass(pass, document.getElementById("pass-remember").checked);
 };
@@ -487,9 +489,9 @@ function adminScreen() {
     </div>
     ${state.error ? `<p class="err mb-3 text-center text-sm">${esc(state.error)}</p>` : ""}
     ${state.admin.map((room) => `<div class="panel rounded-xl p-4 mb-3">
-      <div class="flex justify-between items-center mb-2">
-        <span class="t-main font-bold">${esc(room.name)}</span>
-        <button onclick="adminAsk('deleteRoom','${room.id}')" class="btn-sub px-2 py-1 rounded text-xs">部屋を削除</button>
+      <div class="admin-room-head">
+        <span class="admin-room-name">${esc(room.name)}</span>
+        <button onclick="adminAsk('deleteRoom','${room.id}')" class="btn-sub">部屋を削除</button>
       </div>
       ${room.members.length ? `<ul class="mb-3">${room.members.map((m) => `
         <li class="mem-row ${m.disabled ? "mem-off" : ""}">
@@ -602,7 +604,7 @@ function paint() {
         <div class="flex justify-end mb-2">${nightBtn()}</div>
         <h1 class="title">合言葉</h1>
         <p class="t-dim text-center text-sm mb-6">伝えられた合言葉を入力してください</p>
-        <input id="pass-input" type="password" autocomplete="off" placeholder="合言葉"
+        <input id="pass-input" type="password" autocomplete="off" placeholder="合言葉" value="${esc(state.passDraft || "")}"
           onkeydown="if(event.key==='Enter')enterPass()" class="inp w-full mb-3 px-3 py-2 rounded-lg text-center" />
         <label class="gate-remember"><input type="checkbox" id="pass-remember" checked class="rule-check" />
           <span>この端末に覚えておく（次回から入力なしで入れます）</span></label>
