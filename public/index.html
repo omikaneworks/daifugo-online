@@ -174,6 +174,18 @@ button:disabled{opacity:.3}
 .gate-remember{display:flex;align-items:flex-start;gap:8px;font-size:.85rem;color:var(--dim);line-height:1.4;cursor:pointer}
 .gate-admin{display:block;margin:14px auto 0;background:none;border:none;color:var(--dim);
   opacity:.5;font-size:.78rem;text-decoration:underline;cursor:pointer}
+/* いま開いている部屋の一覧（友達はここからタップするだけで入る） */
+.open-list{display:flex;flex-direction:column;gap:6px;min-height:44px}
+.open-room{display:flex;align-items:center;gap:8px;width:100%;padding:11px 12px;border-radius:10px;
+  border:1px solid var(--border);background:var(--panel);color:var(--text);font-weight:700;text-align:left;cursor:pointer}
+.open-room:hover{border-color:var(--accent)}
+.open-room:disabled{opacity:.5;cursor:default}
+.open-dot{width:9px;height:9px;border-radius:50%;background:#22c55e;flex:0 0 auto}
+.open-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.open-count{color:var(--dim);font-size:.8rem;font-weight:400;flex:0 0 auto}
+.open-badge{background:#22c55e;color:#06280f;border-radius:999px;padding:1px 7px;font-size:.7rem;font-weight:700}
+/* ロビーで知らない人を席から外す（ホストのみ・身内ルームのみ） */
+.kick-btn{padding:2px 8px;border-radius:6px;font-size:.7rem;margin-left:auto}
 /* 部屋コードを持たない身内ルームは、代わりに部屋名を大きく出す */
 .roomname{font-size:1.5rem;font-weight:700;text-align:center;color:var(--text);line-height:1.3}
 /* 管理画面のメンバー一覧。名前・合言葉・操作を縦に積む。
@@ -187,10 +199,6 @@ button:disabled{opacity:.3}
 .mem-btns{display:flex;gap:4px;flex-wrap:wrap;margin-top:2px}
 /* 4つのボタンが狭い画面でも1行に収まる大きさ（折り返すと1人分が縦に伸びて一覧しづらい） */
 .mem-btns .btn-sub{padding:4px 7px;border-radius:6px;font-size:.72rem;white-space:nowrap}
-/* 部屋の見出し。名前は折り返してよいが、削除ボタンは折り返させない */
-.admin-room-head{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px}
-.admin-room-head .btn-sub{flex:0 0 auto;padding:4px 8px;border-radius:6px;font-size:.72rem;white-space:nowrap}
-.admin-room-name{font-weight:700;color:var(--text);line-height:1.35}
 /* 入力欄つきの1行（メンバー追加・部屋追加）。min-width:0 が無いと入力欄が縮まずはみ出す */
 .mem-add{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .mem-add .inp{flex:1 1 6em;min-width:0}

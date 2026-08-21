@@ -48,6 +48,7 @@ const state = {
   // 身内ルーム（合言葉モード）。roomName は部屋コードの代わりに画面へ出す名前
   // admin は管理画面に出す部屋一覧、adminKey は操作のたびに送るマスターキー（端末に残さない）
   roomName: "", busy: false, admin: null, adminKey: "", passDraft: "",
+  openRooms: null, adminOpen: [], adminAsk: null,
 };
 localStorage.setItem("daifugo-pid", state.playerId);
 
@@ -124,7 +125,8 @@ function openSocket(path, first, failMsg, backTo) {
       if (d.room.status === "playing" || d.room.status === "exchange") state.screen = "game";
       else if (d.room.status === "finished") state.screen = "finished";
       else state.screen = "lobby";
-    } else if (d.type === "disbanded") { resetToTitle("部屋が解散されました"); return; }
+    } else if (d.type === "kicked") { resetToTitle("この部屋から外されました"); return; }
+    else if (d.type === "disbanded") { resetToTitle("部屋が解散されました"); return; }
     else if (d.type === "error") state.error = d.message;
     render();
   };
@@ -138,6 +140,7 @@ function resetToTitle(message) {
     ws: null, room: null, code: "", draftRules: null, selected: [], menu: null,
     showRules: false, openCat: null, testMode: false, showGameRules: false,
     roomName: "", busy: false, admin: null, adminKey: "", passDraft: "",
+    openRooms: null, adminOpen: [], adminAsk: null,
     // 身内ルームで借りていた席のIDを、この端末のIDに戻す
     playerId: localStorage.getItem("daifugo-pid") || state.playerId,
     error: message || "", screen: "home",
@@ -162,9 +165,10 @@ W.joinRoom = () => {
   localStorage.setItem("daifugo-name", state.name);
   connect(code, { type: "join", playerId: state.playerId, name: state.name });
 };
-// ---------- 身内ルーム（合言葉モード） ----------
-// 合言葉はサーバーにしか無い。ここでは入力を送って通行証を受け取るだけで、
-// 部屋コードも部屋の一覧もブラウザには渡ってこない。
+// ---------- 身内ルーム ----------
+// 合言葉は「部屋を開ける鍵」。持つのは知り合いだけで、その友達は持たない。
+// 鍵を持つ人が入っている間だけ部屋が一覧に出て、友達は合言葉なしで入れる。
+// 合言葉はサーバーにしか無く、ブラウザには通行証と部屋名しか渡ってこない。
 const PASS_KEY = "daifugo-pass";
 const post = (path, body) =>
   fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
@@ -180,11 +184,37 @@ async function tryPass(pass, remember) {
   if (remember) localStorage.setItem(PASS_KEY, pass); else localStorage.removeItem(PASS_KEY);
   connectPrivate(d.ticket, d.roomName);
 }
-// 隅の入口。合言葉を覚えている端末はそのまま入る（2回目以降は入力なし）
+// 隅の入口。鍵を覚えている端末はそのまま自分の部屋を開く（2回目以降は入力なし）。
+// 持っていない人には「いま遊べる部屋」を出す
 W.openGate = () => {
   const saved = localStorage.getItem(PASS_KEY);
   if (saved) return tryPass(saved, true);
-  state.screen = "gate"; state.error = ""; render();
+  state.screen = "gate"; state.error = ""; state.openRooms = null;
+  render();
+  loadOpenRooms();
+};
+async function loadOpenRooms() {
+  const d = await post("/api/open", {});
+  state.openRooms = d.ok ? d.rooms : [];
+  if (state.screen === "gate") render();
+}
+W.reloadOpen = () => { state.openRooms = null; render(); loadOpenRooms(); };
+// 友達の入室。合言葉は要らない。名前だけ入れてもらう
+W.joinOpen = async (roomId) => {
+  const el = document.getElementById("guest-name");
+  const name = ((el ? el.value : "") || "").trim();
+  if (!name) { state.error = "名前を入力してください"; return render(); }
+  state.name = name;
+  localStorage.setItem("daifugo-name", name);
+  state.busy = true; state.error = ""; render();
+  const d = await post("/api/join", { roomId, name, playerId: localStorage.getItem("daifugo-pid") || "" });
+  state.busy = false;
+  if (!d.ok) {
+    // その部屋が閉じた直後だとここに来る。一覧を取り直して現状を見せる
+    state.error = d.error || "入れませんでした";
+    render(); loadOpenRooms(); return;
+  }
+  connectPrivate(d.ticket, d.roomName);
 };
 W.enterPass = () => {
   const pass = (document.getElementById("pass-input").value || "").trim();
@@ -206,7 +236,7 @@ async function adminCall(body) {
   const d = await post("/api/admin", { key: state.adminKey, ...body });
   state.busy = false;
   if (!d.ok) { state.error = d.error || "失敗しました"; state.admin = null; state.adminKey = ""; }
-  else { state.error = ""; state.admin = d.rooms; }
+  else { state.error = ""; state.admin = d.keys; state.adminOpen = d.open || []; }
   render();
 }
 W.adminLogin = () => {
@@ -214,36 +244,30 @@ W.adminLogin = () => {
   if (!state.adminKey) { state.error = "管理キーを入力してください"; return render(); }
   adminCall({ action: "list" });
 };
-W.adminAct = (action, roomId, memberId) => adminCall({ action, roomId, memberId });
-W.adminCreateRoom = () => {
-  const el = document.getElementById("new-room");
-  const name = (el.value || "").trim();
-  if (!name) { state.error = "部屋の名前を入力してください"; return render(); }
-  el.value = "";
-  adminCall({ action: "createRoom", name });
-};
-W.adminAddMember = (roomId) => {
-  const el = document.getElementById("new-member-" + roomId);
+W.adminAct = (action, keyId) => adminCall({ action, keyId });
+W.adminAddKey = () => {
+  const el = document.getElementById("new-key");
   const name = (el.value || "").trim();
   if (!name) { state.error = "名前を入力してください"; return render(); }
   el.value = "";
-  adminCall({ action: "addMember", roomId, name, owner: document.getElementById("new-owner-" + roomId).checked });
+  adminCall({ action: "addKey", name });
 };
-W.adminToggle = (roomId, memberId, disabled) => adminCall({ action: "setDisabled", roomId, memberId, disabled });
+W.adminToggle = (keyId, disabled) => adminCall({ action: "setDisabled", keyId, disabled });
 // 名前に引用符が入っても壊れないよう、合言葉そのものではなくIDを渡して引き当てる
-W.copyPass = (roomId, memberId) => {
-  const room = (state.admin || []).find((r) => r.id === roomId);
-  const m = room && room.members.find((x) => x.id === memberId);
-  if (!m) return;
-  navigator.clipboard.writeText(m.pass).then(
-    () => { state.error = `${m.name} の合言葉をコピーしました`; render(); },
+W.copyPass = (keyId) => {
+  const k = (state.admin || []).find((x) => x.id === keyId);
+  if (!k) return;
+  navigator.clipboard.writeText(k.pass).then(
+    () => { state.error = `${k.name} の合言葉をコピーしました`; render(); },
     () => { state.error = "コピーできませんでした。長押しで選択してください"; render(); });
 };
 // 消すものは取り返しがつかないので必ず一度止める
-W.adminAsk = (action, roomId, memberId) => { state.adminAsk = { action, roomId, memberId }; render(); };
+W.adminAsk = (action, keyId) => { state.adminAsk = { action, keyId }; render(); };
 W.adminAskNo = () => { state.adminAsk = null; render(); };
 W.adminAskYes = () => { const a = state.adminAsk; state.adminAsk = null; adminCall(a); };
 W.resetToTitleBtn = () => resetToTitle();
+// 知らない人が入ってきたときに、ホストが席から外す（ロビー中のみ）
+W.kickPlayer = (targetId) => send({ type: "kick", targetId });
 
 // 開発用：部屋コードのやり取りを省いて、決め打ちの部屋に直行する（?dev=1 のときだけ出る）
 const DEV_CODE = "DEV0";
@@ -472,10 +496,9 @@ function adminScreen() {
   }
   const ask = state.adminAsk;
   const askBox = !ask ? "" : `<div class="overlay overlay-center"><div class="overlay-body">
-    <p class="pop-t">${ask.action === "deleteRoom" ? "部屋を削除しますか？" : "この人を削除しますか？"}</p>
-    <p class="pop-d">${ask.action === "deleteRoom"
-      ? "この部屋のメンバーと合言葉がすべて消えます。部屋の中の対戦状態も戻せません。"
-      : "この人の合言葉が消えます。もう一度入ってもらうには、追加し直して新しい合言葉を伝えることになります。"}</p>
+    <p class="pop-t">この人を削除しますか？</p>
+    <p class="pop-d">合言葉が消え、この人の部屋も開けなくなります。
+    もう一度使ってもらうには、登録し直して新しい合言葉を伝えることになります。</p>
     <div class="flex gap-2 mt-4">
       <button onclick="adminAskNo()" class="btn-sub rounded-lg py-3 font-bold" style="flex:1">やめる</button>
       <button onclick="adminAskYes()" class="btn-play rounded-lg py-3 font-bold" style="flex:1">削除する</button>
@@ -488,40 +511,33 @@ function adminScreen() {
         <button onclick="resetToTitleBtn()" class="btn-sub px-3 py-1 rounded-lg text-sm">閉じる</button></span>
     </div>
     ${state.error ? `<p class="err mb-3 text-center text-sm">${esc(state.error)}</p>` : ""}
-    ${state.admin.map((room) => `<div class="panel rounded-xl p-4 mb-3">
-      <div class="admin-room-head">
-        <span class="admin-room-name">${esc(room.name)}</span>
-        <button onclick="adminAsk('deleteRoom','${room.id}')" class="btn-sub">部屋を削除</button>
-      </div>
-      ${room.members.length ? `<ul class="mb-3">${room.members.map((m) => `
-        <li class="mem-row ${m.disabled ? "mem-off" : ""}">
-          <span class="mem-name">${esc(m.name)}${m.owner ? '<span class="t-accent text-xs">ホスト</span>' : ""}
-            ${m.disabled ? '<span class="err text-xs">停止中</span>' : ""}</span>
-          <code class="mem-pass">${esc(m.pass)}</code>
+    <div class="panel rounded-xl p-4 mb-3">
+      <p class="t-dim text-sm mb-2">部屋を開ける人（この人たちだけが合言葉を持ちます）</p>
+      ${state.admin.length ? `<ul class="mb-3">${state.admin.map((k) => {
+        const nowOpen = (state.adminOpen || []).find((o) => o.id === k.id);
+        return `<li class="mem-row ${k.disabled ? "mem-off" : ""}">
+          <span class="mem-name">${esc(k.name)}
+            ${nowOpen ? `<span class="open-badge">いま開いています・${nowOpen.count}人</span>` : ""}
+            ${k.disabled ? '<span class="err text-xs">停止中</span>' : ""}</span>
+          <code class="mem-pass">${esc(k.pass)}</code>
           <span class="mem-btns">
-            <button onclick="copyPass('${room.id}','${m.id}')" class="btn-sub">コピー</button>
-            <button onclick="adminAct('regenPass','${room.id}','${m.id}')" class="btn-sub">再発行</button>
-            <button onclick="adminToggle('${room.id}','${m.id}',${!m.disabled})" class="btn-sub">${m.disabled ? "再開" : "停止"}</button>
-            <button onclick="adminAsk('deleteMember','${room.id}','${m.id}')" class="btn-sub">削除</button>
+            <button onclick="copyPass('${k.id}')" class="btn-sub">コピー</button>
+            <button onclick="adminAct('regenPass','${k.id}')" class="btn-sub">再発行</button>
+            <button onclick="adminToggle('${k.id}',${!k.disabled})" class="btn-sub">${k.disabled ? "再開" : "停止"}</button>
+            <button onclick="adminAsk('deleteKey','${k.id}')" class="btn-sub">削除</button>
           </span>
-        </li>`).join("")}</ul>` : `<p class="t-dim text-sm mb-3">まだ誰も登録されていません</p>`}
+        </li>`;
+      }).join("")}</ul>` : `<p class="t-dim text-sm mb-3">まだ誰も登録されていません</p>`}
       <div class="mem-add">
-        <input id="new-member-${room.id}" placeholder="名前" class="inp px-2 py-1 rounded text-sm" />
-        <label class="t-dim text-xs flex items-center gap-1">
-          <input type="checkbox" id="new-owner-${room.id}" class="rule-check" />ホスト</label>
-        <button onclick="adminAddMember('${room.id}')" class="btn-sub px-3 py-1 rounded text-sm font-bold">追加</button>
-      </div>
-    </div>`).join("")}
-    <div class="panel rounded-xl p-4">
-      <p class="t-dim text-sm mb-2">新しい部屋を作る</p>
-      <div class="mem-add">
-        <input id="new-room" placeholder="部屋の名前（例：ゲーム付き合い）"
-          onkeydown="if(event.key==='Enter')adminCreateRoom()" class="inp px-2 py-1 rounded text-sm" />
-        <button onclick="adminCreateRoom()" class="btn-sub px-3 py-1 rounded text-sm font-bold">作る</button>
+        <input id="new-key" placeholder="名前（例：タロウ）"
+          onkeydown="if(event.key==='Enter')adminAddKey()" class="inp px-2 py-1 rounded text-sm" />
+        <button onclick="adminAddKey()" class="btn-sub px-3 py-1 rounded text-sm font-bold">追加</button>
       </div>
     </div>
-    <p class="dev-note mt-3">合言葉は1人1本です。漏れたと思ったら「再発行」を押すと、その人の分だけ変わります
-    （他の人はそのまま遊べます）。「停止」は席を残したまま入れなくします。</p>
+    <p class="dev-note">合言葉を渡すのはここに並んでいる人だけです。<strong>その友達には何も渡しません。</strong>
+    この人が部屋を開けている間、友達は ♠ の一覧からタップするだけで入れます。<br>
+    漏れたと思ったら「再発行」で、その人の分だけ変わります（他の人はそのまま遊べます）。
+    「停止」は登録を残したまま開けなくします。</p>
   </div>${askBox}</div>`;
 }
 function rulesPanel(editable) {
@@ -597,19 +613,34 @@ function paint() {
     return;
   }
 
-  // 合言葉の入力。身内ルームはここからしか入れない
+  // 身内ルームの入口。上が友達用（開いている部屋を選ぶ）、下が鍵を持つ人用（合言葉）
   if (state.screen === "gate") {
+    const rooms = state.openRooms;
+    const list = rooms === null
+      ? `<p class="t-dim text-center text-sm py-3">確認中…</p>`
+      : rooms.length === 0
+        ? `<p class="t-dim text-center text-sm py-3">いま開いている部屋はありません。<br>知り合いが入るまで待ってください。</p>`
+        : rooms.map((rm) => `<button onclick="joinOpen('${rm.id}')" ${state.busy ? "disabled" : ""} class="open-room">
+            <span class="open-dot"></span><span class="open-name">${esc(rm.name)}</span>
+            <span class="open-count">${rm.count}人</span></button>`).join("");
+
     app.innerHTML = `<div class="min-h-screen flex items-center justify-center p-4">
       <div class="w-full max-w-sm panel rounded-2xl p-6">
         <div class="flex justify-end mb-2">${nightBtn()}</div>
-        <h1 class="title">合言葉</h1>
-        <p class="t-dim text-center text-sm mb-6">伝えられた合言葉を入力してください</p>
+        <h2 class="t-accent text-center font-bold mb-1">いま遊べる部屋</h2>
+        <p class="t-dim text-center text-xs mb-3">選んでそのまま入れます</p>
+        <div class="open-list mb-3">${list}</div>
+        <input id="guest-name" value="${esc(state.name)}" placeholder="あなたの名前"
+          class="inp w-full mb-2 px-3 py-2 rounded-lg" />
+        <button onclick="reloadOpen()" class="btn-sub w-full py-2 rounded-lg text-xs mb-4">一覧を更新</button>
+
+        <div class="divider"><span>部屋を開ける人はこちら</span></div>
         <input id="pass-input" type="password" autocomplete="off" placeholder="合言葉" value="${esc(state.passDraft || "")}"
-          onkeydown="if(event.key==='Enter')enterPass()" class="inp w-full mb-3 px-3 py-2 rounded-lg text-center" />
+          onkeydown="if(event.key==='Enter')enterPass()" class="inp w-full mb-2 px-3 py-2 rounded-lg text-center" />
         <label class="gate-remember"><input type="checkbox" id="pass-remember" checked class="rule-check" />
-          <span>この端末に覚えておく（次回から入力なしで入れます）</span></label>
+          <span>この端末に覚えておく（次回から入力なしで開けます）</span></label>
         <button onclick="enterPass()" ${state.busy ? "disabled" : ""}
-          class="btn-play w-full py-3 rounded-lg font-bold mb-3 mt-3">${state.busy ? "確認中…" : "入る"}</button>
+          class="btn-play w-full py-3 rounded-lg font-bold mb-3 mt-3">${state.busy ? "確認中…" : "部屋を開く"}</button>
         <button onclick="resetToTitleBtn()" class="btn-sub w-full py-2 rounded-lg text-sm">← タイトルに戻る</button>
         ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
         <button onclick="openAdmin()" class="gate-admin">管理</button>
@@ -644,7 +675,9 @@ function paint() {
       </div>
       ${r.private ? `<h2 class="t-accent text-center text-sm mb-1">身内ルーム</h2>
       <div class="roomname">${esc(r.name || "")}</div>
-      <p class="t-dim text-center text-xs mb-5">合言葉を持っている人だけが入れます</p>`
+      <p class="t-dim text-center text-xs mb-5">${r.keyPresent
+        ? "開いています。友達は ♠ の一覧からそのまま入れます"
+        : "閉じています。部屋の持ち主が入るまで新しい人は入れません"}</p>`
       : `<h2 class="t-accent text-center text-sm mb-1">部屋コード</h2>
       <div class="roomcode">${r.code}</div>
       <p class="t-dim text-center text-xs mb-5">友達にこのコードを伝えてください</p>`}
@@ -657,6 +690,8 @@ function paint() {
           ${p.id === r.hostId ? '<span class="t-accent text-xs">ホスト</span>' : ""}
           ${p.id === state.playerId ? '<span class="t-dim text-xs">あなた</span>' : ""}
           ${r.classes && r.classes[p.id] ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${badgeColor(r.classes[p.id])}">${r.classes[p.id]}</span>` : ""}
+          ${isHost && r.private && p.id !== r.roomId && p.id !== state.playerId
+            ? `<button onclick="kickPlayer('${p.id}')" class="btn-sub kick-btn">外す</button>` : ""}
         </li>`).join("")}</ul>
       </div>
       ${isHost ? `<div class="flex gap-2 mb-2">

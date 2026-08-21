@@ -95,11 +95,38 @@ export class DaifugoRoom {
       try { await this.handleMessage(server, msg); }
       catch (e) { server.send(JSON.stringify({ type: "error", message: "エラー: " + (e && e.message ? e.message : "不明") })); }
     });
-    server.addEventListener("close", () => { this.sessions.delete(server); this.verified.delete(server); });
+    server.addEventListener("close", () => {
+      this.sessions.delete(server);
+      this.verified.delete(server);
+      // 鍵を持つ人が抜けたら、その場で一覧から消す（60秒待たせない）
+      this.reportOpen(true);
+      // 残っている人の画面にも「閉じた」ことを伝える
+      if (this.room && this.room.private) this.persistAndBroadcast().catch(() => {});
+    });
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  // 身内ルームが「いま開いているか」を台帳へ報告する。
+  // 鍵を持つ人（key:true）が1人でも繋がっていれば開。誰もいなければ閉じて一覧から消す。
+  // すでに中にいる人は追い出さない（電波が切れただけで対戦が壊れるほうが困るため）
+  reportOpen(force) {
+    const r = this.room;
+    if (!r || !r.private || !r.roomId) return;
+    const now = Date.now();
+    const open = [...this.verified.values()].some((m) => m && m.key);
+    // 開いている間は鮮度を更新し続ける必要があるが、毎回叩くと無駄なので間引く
+    if (!force && open && now - (this.lastReport || 0) < OPEN_PING_MS) return;
+    this.lastReport = now;
+    const body = { roomId: r.roomId, name: r.name, open, count: r.players.length };
+    this.env.PRIVATE.get(this.env.PRIVATE.idFromName("registry"))
+      .fetch("https://registry/setOpen", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+      })
+      .catch(() => { this.lastReport = 0; }); // 失敗したら次の機会に出し直す
+  }
+
   async persistAndBroadcast() {
+    this.reportOpen(false);
     await this.state.storage.put("room", this.room);
     for (const [ws, pid] of this.sessions.entries()) {
       try { ws.send(JSON.stringify({ type: "state", room: this.sanitize(pid) })); }
@@ -126,6 +153,8 @@ export class DaifugoRoom {
       // 身内ルームでは席のIDをサーバーが決める（端末が名乗るIDは使わない）ので、
       // 「あなたはこれ」を必ず添えて返す。これが無いと自分の手札もホスト権限も見つけられない
       you: forPlayerId,
+      // 鍵を持つ人がいま繋がっているか。いなければ新しい友達は入ってこられない
+      keyPresent: [...this.verified.values()].some((m) => m && m.key),
       players: this.room.players.map((p) =>
         p.id === forPlayerId || (acting && p.id === acting) ? p : { ...p, hand: undefined }),
     };
@@ -184,8 +213,11 @@ export class DaifugoRoom {
     //  ・身内ルーム（合言葉を通った接続。部屋名は登録側が決めるので msg は使わない）
     //  ・開発部屋（?dev=1 の決め打ちの部屋）
     if (type === "enter" && !this.room) {
+      // 部屋を作れるのは鍵を持つ人だけ。友達（key:false）は開いている部屋にしか入れない。
+      // 台帳が「開いている」と言っていても部屋の中身が消えている場合にここへ来る
+      if (v && !v.key) { ws.send(JSON.stringify({ type: "error", message: "この部屋は閉じています" })); return; }
       this.room = v ? this.newRoom("", playerId, v.name) : this.newRoom(msg.code, playerId, msg.name);
-      if (v) { this.room.private = true; this.room.name = v.roomName; }
+      if (v) { this.room.private = true; this.room.name = v.roomName; this.room.roomId = v.roomId; }
       this.sessions.set(ws, playerId);
       await this.persistAndBroadcast();
       return;
@@ -213,10 +245,30 @@ export class DaifugoRoom {
         r.hostId = playerId;
         r.log.push(`${myName} がホストになりました`);
       }
-      // 身内ルームは、ロビー中にオーナーが来たらホストをオーナーに戻す
-      if (v && v.owner && r.status === "waiting" && r.hostId !== playerId) {
+      // 身内ルームは部屋の持ち主（鍵を持つ人）のもの。ロビー中に来たらホストを返す
+      if (v && v.key && r.status === "waiting" && r.hostId !== playerId) {
         r.hostId = playerId;
         r.log.push(`${myName} がホストになりました`);
+      }
+      // 鍵を持つ人が入った＝部屋が開いた。すぐ一覧に出す
+      if (v && v.key) this.reportOpen(true);
+      await this.persistAndBroadcast();
+      return;
+    }
+
+    // 入ってきた人を席から外す（ホストのみ・ロビー中のみ）。
+    // ♠ を見つけた知らない人が入ってくることがあるので、追い出す手段を用意しておく
+    if (type === "kick") {
+      if (r.hostId !== playerId) { ws.send(JSON.stringify({ type: "error", message: "ホストだけが操作できます" })); return; }
+      if (r.status !== "waiting") { ws.send(JSON.stringify({ type: "error", message: "ゲーム中は外せません" })); return; }
+      const target = r.players.find((p) => p.id === msg.targetId);
+      if (!target) return;
+      // 部屋の持ち主（鍵のIDと同じ席）は外せない。外すと誰も部屋を開けられなくなる
+      if (target.id === r.roomId) { ws.send(JSON.stringify({ type: "error", message: "部屋の持ち主は外せません" })); return; }
+      r.players = r.players.filter((p) => p.id !== msg.targetId);
+      r.log.push(`${target.name} を席から外しました`);
+      for (const [sock, pid] of this.sessions.entries()) {
+        if (pid === msg.targetId) { try { sock.send(JSON.stringify({ type: "kicked" })); sock.close(); } catch {} }
       }
       await this.persistAndBroadcast();
       return;
@@ -1093,6 +1145,9 @@ const FAIL_LIMIT = 5;              // ここまで間違えたら待たせる
 const FAIL_BASE_MS = 60 * 1000;    // 待ち時間の基準（以降は倍々。上限あり）
 const FAIL_MAX_STEP = 6;
 const FAIL_RESET_MS = 60 * 60 * 1000; // これだけ間が空いたら回数を数え直す
+// 部屋が「開いている」とみなす鮮度。部屋のDOはこれより短い間隔で報告を更新する
+const OPEN_TTL_MS = 60 * 1000;
+const OPEN_PING_MS = 20 * 1000;
 
 const jsonRes = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json" } });
 
@@ -1133,14 +1188,17 @@ export class PrivateRegistry {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.data = null;
+    this.keys = null;
   }
 
+  // 鍵は1本＝1部屋。部屋を別に作る概念は無い（管理を1枚のリストで済ませるため）
   async load() {
-    if (!this.data) this.data = (await this.state.storage.get("data")) || { rooms: [] };
-    return this.data;
+    if (!this.keys) this.keys = (await this.state.storage.get("keys")) || [];
+    return this.keys;
   }
-  async save() { await this.state.storage.put("data", this.data); }
+  async save() { await this.state.storage.put("keys", this.keys); }
+  // 部屋の呼び名は登録名から自動で決める。ヨコさんが部屋名を考える手間をなくす
+  roomNameOf(name) { return `${name}の部屋`; }
 
   // ---- 総当たり対策：同じ相手が続けて外したら待たせる ----
   async waitSec(key) {
@@ -1187,34 +1245,81 @@ export class PrivateRegistry {
     try { body = await request.json(); } catch { body = {}; }
 
     if (url.pathname === "/api/gate") return this.gate(body, ip);
+    if (url.pathname === "/api/open") return this.openList();
+    if (url.pathname === "/api/join") return this.join(body);
     if (url.pathname === "/api/admin") return this.admin(body, ip);
-    if (url.pathname === "/claim") return this.claim(body); // Worker からだけ呼ばれる
+    if (url.pathname === "/claim") return this.claim(body);     // Worker からだけ呼ばれる
+    if (url.pathname === "/setOpen") return this.setOpen(body); // 部屋のDOからだけ呼ばれる
     return new Response("Not found", { status: 404 });
   }
 
-  // 合言葉 → 通行証
+  // ---- 開いている部屋の台帳 ----
+  // 「いま鍵を持つ人が繋がっているか」は部屋のDOしか知らないので、DOから報告してもらう。
+  // at の鮮度で見るので、DOが落ちても最大 OPEN_TTL_MS で自然に消える（開きっぱなしにならない）
+  async setOpen(body) {
+    const open = (await this.state.storage.get("open")) || {};
+    const id = String(body.roomId || "");
+    if (!id) return jsonRes({ ok: false });
+    if (body.open) open[id] = { name: String(body.name || ""), count: Number(body.count) || 0, at: Date.now() };
+    else delete open[id];
+    // 古い記録の掃除もここでまとめてやる
+    const now = Date.now();
+    for (const k of Object.keys(open)) if (open[k].at < now - OPEN_TTL_MS) delete open[k];
+    await this.state.storage.put("open", open);
+    return jsonRes({ ok: true });
+  }
+  async freshOpen() {
+    const open = (await this.state.storage.get("open")) || {};
+    const now = Date.now();
+    return Object.entries(open)
+      .filter(([, v]) => v.at > now - OPEN_TTL_MS)
+      .map(([id, v]) => ({ id, name: v.name, count: v.count }));
+  }
+  // 友達に見せる一覧。合言葉も鍵の一覧も返さない
+  async openList() {
+    return jsonRes({ ok: true, rooms: await this.freshOpen() });
+  }
+
+  // 合言葉 → 自分の部屋を開ける通行証
   async gate(body, ip) {
     const wait = await this.waitSec(ip);
     if (wait > 0) return jsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
 
     const pass = String(body.pass || "").trim();
-    const d = await this.load();
+    const keys = await this.load();
     let hit = null;
     // 見つかっても打ち切らない（当たりの位置が応答時間で漏れないように）
-    for (const room of d.rooms) for (const mb of room.members) if (safeEqual(mb.pass, pass)) hit = { room, mb };
+    for (const k of keys) if (safeEqual(k.pass, pass)) hit = k;
 
-    if (!hit || hit.mb.disabled) {
+    if (!hit || hit.disabled) {
       await this.addFail(ip);
       return jsonRes({ ok: false, error: hit ? "この合言葉は停止されています" : "合言葉が違います" });
     }
     await this.clearFail(ip);
-    hit.mb.lastUsedAt = Date.now();
+    hit.lastUsedAt = Date.now();
     await this.save();
 
-    const member = { id: hit.mb.id, name: hit.mb.name, owner: !!hit.mb.owner, roomName: hit.room.name };
-    const ticket = await this.issueTicket(hit.room.id, member);
-    // 部屋コード（roomId）は返さない
-    return jsonRes({ ok: true, ticket, roomName: hit.room.name, memberName: hit.mb.name });
+    const roomName = this.roomNameOf(hit.name);
+    // key:true が「部屋を開ける人」の印。部屋側はこれを見てホストにする
+    const member = { id: hit.id, name: hit.name, key: true, roomId: hit.id, roomName };
+    const ticket = await this.issueTicket(hit.id, member);
+    // 部屋の識別子（roomId）は返さない
+    return jsonRes({ ok: true, ticket, roomName, memberName: hit.name });
+  }
+
+  // 友達の入室。合言葉は要らないが、その部屋がいま開いていることが条件
+  async join(body) {
+    const roomId = String(body.roomId || "");
+    const found = (await this.freshOpen()).find((r) => r.id === roomId);
+    if (!found) return jsonRes({ ok: false, error: "この部屋は閉じています。開いている部屋を選び直してください" });
+
+    const name = String(body.name || "").trim().slice(0, 12) || "ゲスト";
+    // 席のIDには必ず g: を付ける。鍵のID（roomId と同じ値）と絶対に一致しないので、
+    // 友達が鍵を持つ人になりすましてホストを乗っ取ることはできない
+    const pid = String(body.playerId || "").replace(/[^A-Za-z0-9-]/g, "").slice(0, 40) || randomId(12);
+    const member = { id: "g:" + pid, name, key: false, roomId, roomName: found.name };
+    const ticket = await this.issueTicket(roomId, member);
+    return jsonRes({ ok: true, ticket, roomName: found.name, memberName: name });
   }
 
   // 通行証 → 部屋。使ったら即消す
@@ -1241,41 +1346,35 @@ export class PrivateRegistry {
     }
     await this.clearFail(key);
 
-    const d = await this.load();
-    const room = () => d.rooms.find((x) => x.id === body.roomId);
-    const member = () => { const r = room(); return r && r.members.find((m) => m.id === body.memberId); };
-    // 合言葉は全部屋を通して重複させない（重複すると行き先が定まらない）
+    const keys = await this.load();
+    const one = () => keys.find((k) => k.id === body.keyId);
+    // 合言葉は全体で重複させない（重複すると行き先が定まらない）
     const freshPass = () => {
-      const used = new Set(d.rooms.flatMap((r) => r.members.map((m) => m.pass)));
+      const used = new Set(keys.map((k) => k.pass));
       let p; do { p = makePass(); } while (used.has(p));
       return p;
     };
 
     switch (body.action) {
       case "list": break;
-      case "createRoom":
-        d.rooms.push({ id: randomId(12), name: String(body.name || "新しい部屋").slice(0, 20), members: [] });
-        break;
-      case "renameRoom": { const r = room(); if (r) r.name = String(body.name || r.name).slice(0, 20); break; }
-      case "deleteRoom": d.rooms = d.rooms.filter((x) => x.id !== body.roomId); break;
-      case "addMember": {
-        const r = room();
-        if (r) r.members.push({
-          id: "m-" + randomId(10), name: String(body.name || "名無し").slice(0, 12),
-          pass: freshPass(), owner: !!body.owner, disabled: false, lastUsedAt: null,
+      case "addKey":
+        // 鍵のIDがそのまま部屋の識別子になる
+        keys.push({
+          id: randomId(12), name: String(body.name || "名無し").slice(0, 12),
+          pass: freshPass(), disabled: false, lastUsedAt: null,
         });
         break;
-      }
-      case "renameMember": { const m = member(); if (m) m.name = String(body.name || m.name).slice(0, 12); break; }
-      case "regenPass": { const m = member(); if (m) m.pass = freshPass(); break; }
-      case "setDisabled": { const m = member(); if (m) m.disabled = !!body.disabled; break; }
-      case "deleteMember": { const r = room(); if (r) r.members = r.members.filter((m) => m.id !== body.memberId); break; }
+      case "renameKey": { const k = one(); if (k) k.name = String(body.name || k.name).slice(0, 12); break; }
+      case "regenPass": { const k = one(); if (k) k.pass = freshPass(); break; }
+      case "setDisabled": { const k = one(); if (k) k.disabled = !!body.disabled; break; }
+      case "deleteKey": this.keys = keys.filter((k) => k.id !== body.keyId); break;
       // 間違え続けて待たされている人を、その場で解除する
       case "clearLocks": await this.state.storage.put("fails", {}); break;
       default: return jsonRes({ ok: false, error: "不明な操作です" });
     }
     await this.save();
-    return jsonRes({ ok: true, rooms: d.rooms });
+    // いま開いている部屋も一緒に返す（管理画面で誰が遊んでいるか分かる）
+    return jsonRes({ ok: true, keys: this.keys, open: await this.freshOpen() });
   }
 }
 
@@ -1293,7 +1392,7 @@ export default {
     }
 
     // 合言葉の照合と管理。合言葉は body で受け取る（URLに載せると履歴やログに残る）
-    if (url.pathname === "/api/gate" || url.pathname === "/api/admin") {
+    if (["/api/gate", "/api/open", "/api/join", "/api/admin"].includes(url.pathname)) {
       if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
       return registry(env).fetch(request);
     }
