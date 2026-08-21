@@ -19,12 +19,13 @@ const SUIT_COLOR = { S: "c-black", H: "c-red", D: "c-red", C: "c-black", JOKER: 
 const PICK_RANKS = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2));
-const strength = (rank, rev) => (rev ? -rank : rank);
 const effRev = (r) => !!r.revolution !== !!r.tempReverse;
-function sortHand(hand, rev) {
+// 手札の並びは常に 3→2（Joker は右端）。革命・一時反転で強弱が逆になっても
+// 並べ替えない（同じ札が毎回同じ位置にある方が探しやすいため）
+function sortHand(hand) {
   return [...hand].sort((a, b) => {
-    const sa = a.suit === "JOKER" ? 999 : strength(a.rank, rev);
-    const sb = b.suit === "JOKER" ? 999 : strength(b.rank, rev);
+    const sa = a.suit === "JOKER" ? 999 : a.rank;
+    const sb = b.suit === "JOKER" ? 999 : b.rank;
     return sa - sb;
   });
 }
@@ -726,9 +727,15 @@ function paint() {
     const actId = actingId();
     const act = r.players.find((p) => p.id === actId) || me;
     const canAct = isTest ? !act.isCPU : actId === state.playerId;
-    const hand = sortHand((isTest ? act.hand : me.hand) || [], rev);
-    // 席順はシャッフルされるので、参加順ではなく手番が回る順（r.order）で並べる
-    const seatOf = (id) => { const i = r.order.indexOf(id); return i < 0 ? 99 : i; };
+    const hand = sortHand((isTest ? act.hand : me.hand) || []);
+    // 席順はシャッフルされるので、参加順ではなく手番が回る順（r.order）で並べる。
+    // 自分の次に打つ人が先頭。自分が席にいないとき（観戦等）は order の先頭から
+    const mySeat = r.order.indexOf(state.playerId);
+    const seatOf = (id) => {
+      const i = r.order.indexOf(id);
+      if (i < 0) return 99;
+      return mySeat < 0 ? i : (i - mySeat + r.order.length) % r.order.length;
+    };
     const others = r.players.filter((p) => p.id !== state.playerId).sort((a, b) => seatOf(a.id) - seatOf(b.id));
 
     // 交換フェーズ

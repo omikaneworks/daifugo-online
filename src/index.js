@@ -9,6 +9,9 @@ const RANK_LABEL = (r) => ({ 11: "J", 12: "Q", 13: "K", 14: "A", 15: "2", 16: "J
 const IS_RED = (s) => s === "H" || s === "D";
 // rules.startCard の「◯3を持つ人」指定と、そのスートの対応
 const START_SUIT = { diamond3: "D", spade3: "S", heart3: "H", club3: "C" };
+// CPU の名前候補（参加時に未使用のものからランダムに選ぶ）
+const CPU_NAMES = ["ハルト", "アオイ", "ソラ", "ナナ", "リク", "ミカ", "ケンタ", "ユウキ", "サクラ", "ツバサ"];
+
 // 場に残して見せる直近の手の数（room.pile）
 const PILE_MAX = 3;
 
@@ -350,8 +353,12 @@ export class DaifugoRoom {
       if (playerId !== r.hostId || r.status !== "waiting") return;
       if (r.players.length >= 6) { ws.send(JSON.stringify({ type: "error", message: "満員です" })); return; }
       const n = r.players.filter((p) => p.isCPU).length + 1;
-      r.players.push({ id: `cpu-${n}-${Date.now()}`, name: `CPU ${n}`, isCPU: true, hand: [], handCount: 0, finished: false, finishOrder: null });
-      r.log.push(`CPU ${n} が参加しました`);
+      // 部屋にいる人と名前がかぶらないよう、空いている候補からランダムに選ぶ
+      const used = new Set(r.players.map((p) => p.name));
+      const free = CPU_NAMES.filter((nm) => !used.has(nm));
+      const name = free.length ? free[Math.floor(Math.random() * free.length)] : `CPU ${n}`;
+      r.players.push({ id: `cpu-${n}-${Date.now()}`, name, isCPU: true, hand: [], handCount: 0, finished: false, finishOrder: null });
+      r.log.push(`${name} が参加しました`);
       await this.persistAndBroadcast();
       return;
     }
