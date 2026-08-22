@@ -1186,6 +1186,14 @@ const PASS_WORDS = [
   "shiokaze", "harukaze", "natsugumo", "akatsuki", "yozora", "tsukikage", "hanabi", "wakaba",
   "kaminari", "midori", "kohaku", "ruriiro", "ayame", "nadeshiko", "himawari", "rindou",
 ];
+// 友達に教える部屋コード。一般の部屋コード（4文字）と絶対に混ざらないよう6文字にし、
+// 見間違えやすい文字（0/O・1/I/L）は使わない
+const CODE_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+function makeCode() {
+  let c = "";
+  for (let i = 0; i < 6; i++) c += CODE_CHARS[randomInt(CODE_CHARS.length)];
+  return c;
+}
 function makePass() {
   const w = () => PASS_WORDS[randomInt(PASS_WORDS.length)];
   return `${w()}-${w()}-${1000 + randomInt(9000)}`;
@@ -1201,6 +1209,15 @@ export class PrivateRegistry {
   // 鍵は1本＝1部屋。部屋を別に作る概念は無い（管理を1枚のリストで済ませるため）
   async load() {
     if (!this.keys) this.keys = (await this.state.storage.get("keys")) || [];
+    // 部屋コードは後から足した項目。まだ持っていない鍵にはここで配る
+    const used = new Set(this.keys.map((k) => k.code).filter(Boolean));
+    let added = false;
+    for (const k of this.keys) {
+      if (k.code) continue;
+      let c; do { c = makeCode(); } while (used.has(c));
+      used.add(c); k.code = c; added = true;
+    }
+    if (added) await this.save();
     return this.keys;
   }
   async save() { await this.state.storage.put("keys", this.keys); }
@@ -1252,8 +1269,7 @@ export class PrivateRegistry {
     try { body = await request.json(); } catch { body = {}; }
 
     if (url.pathname === "/api/gate") return this.gate(body, ip);
-    if (url.pathname === "/api/open") return this.openList();
-    if (url.pathname === "/api/join") return this.join(body);
+    if (url.pathname === "/api/join") return this.join(body, ip);
     if (url.pathname === "/api/admin") return this.admin(body, ip);
     if (url.pathname === "/claim") return this.claim(body);     // Worker からだけ呼ばれる
     if (url.pathname === "/setOpen") return this.setOpen(body); // 部屋のDOからだけ呼ばれる
@@ -1282,11 +1298,6 @@ export class PrivateRegistry {
       .filter(([, v]) => v.at > now - OPEN_TTL_MS)
       .map(([id, v]) => ({ id, name: v.name, count: v.count }));
   }
-  // 友達に見せる一覧。合言葉も鍵の一覧も返さない
-  async openList() {
-    return jsonRes({ ok: true, rooms: await this.freshOpen() });
-  }
-
   // 合言葉 → 自分の部屋を開ける通行証
   async gate(body, ip) {
     const wait = await this.waitSec(ip);
@@ -1310,15 +1321,30 @@ export class PrivateRegistry {
     // key:true が「部屋を開ける人」の印。部屋側はこれを見てホストにする
     const member = { id: hit.id, name: hit.name, key: true, roomId: hit.id, roomName };
     const ticket = await this.issueTicket(hit.id, member);
-    // 部屋の識別子（roomId）は返さない
-    return jsonRes({ ok: true, ticket, roomName, memberName: hit.name });
+    // 部屋の識別子（roomId）は返さない。友達に教えてもらう部屋コードだけ渡す
+    return jsonRes({ ok: true, ticket, roomName, memberName: hit.name, code: hit.code });
   }
 
-  // 友達の入室。合言葉は要らないが、その部屋がいま開いていることが条件
-  async join(body) {
-    const roomId = String(body.roomId || "");
+  // 友達の入室。合言葉は要らない。知人に教わった部屋コードで入る。
+  // 部屋コードが合っていても、その部屋がいま開いていることが条件
+  async join(body, ip) {
+    const wait = await this.waitSec(ip);
+    if (wait > 0) return jsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
+
+    const code = String(body.code || "").trim().toUpperCase();
+    const keys = await this.load();
+    let hit = null;
+    // 見つかっても打ち切らない（当たりの位置が応答時間で漏れないように）
+    for (const k of keys) if (safeEqual(k.code, code)) hit = k;
+    if (!hit || hit.disabled) {
+      await this.addFail(ip);
+      return jsonRes({ ok: false, error: "この部屋コードは使えません" });
+    }
+    await this.clearFail(ip);
+
+    const roomId = hit.id;
     const found = (await this.freshOpen()).find((r) => r.id === roomId);
-    if (!found) return jsonRes({ ok: false, error: "この部屋は閉じています。開いている部屋を選び直してください" });
+    if (!found) return jsonRes({ ok: false, error: `${this.roomNameOf(hit.name)}はまだ開いていません。開くまで待ってください` });
 
     const name = String(body.name || "").trim().slice(0, 12) || "ゲスト";
     // 席のIDには必ず g: を付ける。鍵のID（roomId と同じ値）と絶対に一致しないので、
@@ -1340,16 +1366,21 @@ export class PrivateRegistry {
   }
 
   // ---- 管理（マスターキーが要る） ----
+  // ローカル開発だけは管理キーなしで通す。有効になるのは .dev.vars に DAIFUGO_DEV=1 が
+  // あるときだけで、.dev.vars は wrangler dev 専用（デプロイされない）ので本番は素通りしない
   async admin(body, ip) {
+    const devOpen = this.env.DAIFUGO_DEV === "1";
     const key = "admin:" + ip;
-    const wait = await this.waitSec(key);
-    if (wait > 0) return jsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
+    if (!devOpen) {
+      const wait = await this.waitSec(key);
+      if (wait > 0) return jsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
 
-    const master = this.env.DAIFUGO_MASTER_KEY;
-    if (!master) return jsonRes({ ok: false, error: "管理キーが未設定です（wrangler secret put DAIFUGO_MASTER_KEY）" });
-    if (!safeEqual(master, body.key)) {
-      await this.addFail(key);
-      return jsonRes({ ok: false, error: "管理キーが違います" });
+      const master = this.env.DAIFUGO_MASTER_KEY;
+      if (!master) return jsonRes({ ok: false, error: "管理キーが未設定です（wrangler secret put DAIFUGO_MASTER_KEY）" });
+      if (!safeEqual(master, body.key)) {
+        await this.addFail(key);
+        return jsonRes({ ok: false, error: "管理キーが違います" });
+      }
     }
     await this.clearFail(key);
 
@@ -1361,6 +1392,12 @@ export class PrivateRegistry {
       let p; do { p = makePass(); } while (used.has(p));
       return p;
     };
+    // 部屋コードも全体で重複させない（重複すると行き先が定まらない）
+    const freshCode = () => {
+      const used = new Set(keys.map((k) => k.code).filter(Boolean));
+      let c; do { c = makeCode(); } while (used.has(c));
+      return c;
+    };
 
     switch (body.action) {
       case "list": break;
@@ -1368,11 +1405,12 @@ export class PrivateRegistry {
         // 鍵のIDがそのまま部屋の識別子になる
         keys.push({
           id: randomId(12), name: String(body.name || "名無し").slice(0, 12),
-          pass: freshPass(), disabled: false, lastUsedAt: null,
+          pass: freshPass(), code: freshCode(), disabled: false, lastUsedAt: null,
         });
         break;
       case "renameKey": { const k = one(); if (k) k.name = String(body.name || k.name).slice(0, 12); break; }
       case "regenPass": { const k = one(); if (k) k.pass = freshPass(); break; }
+      case "regenCode": { const k = one(); if (k) k.code = freshCode(); break; }
       case "setDisabled": { const k = one(); if (k) k.disabled = !!body.disabled; break; }
       case "deleteKey": this.keys = keys.filter((k) => k.id !== body.keyId); break;
       // 間違え続けて待たされている人を、その場で解除する
@@ -1399,7 +1437,7 @@ export default {
     }
 
     // 合言葉の照合と管理。合言葉は body で受け取る（URLに載せると履歴やログに残る）
-    if (["/api/gate", "/api/open", "/api/join", "/api/admin"].includes(url.pathname)) {
+    if (["/api/gate", "/api/join", "/api/admin"].includes(url.pathname)) {
       if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
       return registry(env).fetch(request);
     }

@@ -1,4 +1,5 @@
 import { RULE_CATEGORIES, buildDefaultRules, PRESETS, presetRules, sameRules } from "./rules.js";
+import { qrSVG } from "./qr.js";
 
 // --- 自作プリセット（この端末に保存される）---
 const CUSTOM_KEY = "daifugo-presets";
@@ -39,6 +40,11 @@ function badgeColor(label) {
 }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+// 端末に覚えるもの。合言葉は知人だけ、部屋コードは一度入った友達だけが持つ。
+// どちらか持っている端末にだけトップの ♠ を出す（＝一般の人には出ない）
+const PASS_KEY = "daifugo-pass";
+const CODE_KEY = "daifugo-code";
+
 const state = {
   playerId: localStorage.getItem("daifugo-pid") || uuid(),
   name: localStorage.getItem("daifugo-name") || "",
@@ -49,7 +55,7 @@ const state = {
   // 身内ルーム（合言葉モード）。roomName は部屋コードの代わりに画面へ出す名前
   // admin は管理画面に出す部屋一覧、adminKey は操作のたびに送るマスターキー（端末に残さない）
   roomName: "", busy: false, admin: null, adminKey: "", passDraft: "",
-  openRooms: null, adminOpen: [], adminAsk: null,
+  codeDraft: localStorage.getItem(CODE_KEY) || "", privateCode: "", qr: false, adminOpen: [], adminAsk: null,
 };
 localStorage.setItem("daifugo-pid", state.playerId);
 
@@ -57,6 +63,22 @@ localStorage.setItem("daifugo-pid", state.playerId);
 // 端末に記憶はしない（通常URLで開けば必ずOFF）。記憶すると、通常URLを開いた
 // つもりでも開発者メニューが出続けて紛らわしいため。
 const IS_DEV = new URLSearchParams(location.search).get("dev") === "1";
+// 身内ルームの入口はURLで分ける。トップ画面に ♠ を出さないので一般の人には見えない。
+//   ?k=1     知人用。合言葉の画面（端末が覚えていればそのまま自分の部屋が開く）
+//   ?r=CODE  友達用の招待リンク。部屋コードを入れた状態で開くので、名前だけ入れれば入れる
+// 知人が友達に渡すものはこのリンク1本だけ。「♠を押して」「コードを打って」を説明せずに済む。
+// 読んだらURLからは消す（履歴やスクリーンショットに部屋コードを残さない）
+const ENTRY_Q = new URLSearchParams(location.search);
+const ENTRY_KEY = ENTRY_Q.get("k") === "1";
+const ENTRY_CODE = (ENTRY_Q.get("r") || "").trim().toUpperCase();
+if (ENTRY_KEY || ENTRY_CODE) {
+  ENTRY_Q.delete("k"); ENTRY_Q.delete("r");
+  const rest = ENTRY_Q.toString();
+  history.replaceState(null, "", location.pathname + (rest ? "?" + rest : ""));
+}
+// ローカル開発（wrangler dev）かどうか。管理画面の管理キーを省くためだけに使う。
+// 実際に通すか決めるのはサーバー側（.dev.vars の DAIFUGO_DEV）なので、ここは入口の見た目だけ
+const IS_LOCAL = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
 localStorage.removeItem("daifugo-dev"); // 記憶方式だった頃の値の後始末
 
 // ダミー席がある部屋は必ずテストモード（誰も自動で着手しないため）
@@ -88,9 +110,11 @@ function connect(code, first) {
 }
 // 身内ルーム。合言葉と引き換えに受け取った通行証でつなぐ。
 // 部屋コードはサーバーから渡ってこないので、画面には部屋名を出す
-function connectPrivate(ticket, roomName) {
+function connectPrivate(ticket, roomName, privateCode) {
   state.code = "";
   state.roomName = roomName;
+  // 部屋コードは鍵を持つ人にだけ返る。友達に伝えてもらうためロビーに出す
+  state.privateCode = privateCode || "";
   openSocket(`/api/private/${ticket}/ws`, { type: "enter" },
     "部屋に入れませんでした。合言葉を入れ直してください", "gate");
 }
@@ -141,7 +165,7 @@ function resetToTitle(message) {
     ws: null, room: null, code: "", draftRules: null, selected: [], menu: null,
     showRules: false, openCat: null, testMode: false, showGameRules: false,
     roomName: "", busy: false, admin: null, adminKey: "", passDraft: "",
-    openRooms: null, adminOpen: [], adminAsk: null,
+    codeDraft: localStorage.getItem(CODE_KEY) || "", privateCode: "", qr: false, adminOpen: [], adminAsk: null,
     // 身内ルームで借りていた席のIDを、この端末のIDに戻す
     playerId: localStorage.getItem("daifugo-pid") || state.playerId,
     error: message || "", screen: "home",
@@ -168,9 +192,9 @@ W.joinRoom = () => {
 };
 // ---------- 身内ルーム ----------
 // 合言葉は「部屋を開ける鍵」。持つのは知り合いだけで、その友達は持たない。
-// 鍵を持つ人が入っている間だけ部屋が一覧に出て、友達は合言葉なしで入れる。
+// 友達が持つのは部屋コード（招待リンク）だけで、これでは部屋を開けられない。
+// 鍵を持つ人が入っている間だけ、友達はその部屋に入れる。
 // 合言葉はサーバーにしか無く、ブラウザには通行証と部屋名しか渡ってこない。
-const PASS_KEY = "daifugo-pass";
 const post = (path, body) =>
   fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
     .then((r) => r.json())
@@ -183,38 +207,34 @@ async function tryPass(pass, remember) {
   if (!d.ok) { state.error = d.error || "合言葉が違います"; state.screen = "gate"; return render(); }
   state.passDraft = "";
   if (remember) localStorage.setItem(PASS_KEY, pass); else localStorage.removeItem(PASS_KEY);
-  connectPrivate(d.ticket, d.roomName);
+  connectPrivate(d.ticket, d.roomName, d.code);
 }
 // 隅の入口。鍵を覚えている端末はそのまま自分の部屋を開く（2回目以降は入力なし）。
 // 持っていない人には「いま遊べる部屋」を出す
 W.openGate = () => {
   const saved = localStorage.getItem(PASS_KEY);
   if (saved) return tryPass(saved, true);
-  state.screen = "gate"; state.error = ""; state.openRooms = null;
+  state.screen = "gate"; state.error = "";
   render();
-  loadOpenRooms();
 };
-async function loadOpenRooms() {
-  const d = await post("/api/open", {});
-  state.openRooms = d.ok ? d.rooms : [];
-  if (state.screen === "gate") render();
-}
-W.reloadOpen = () => { state.openRooms = null; render(); loadOpenRooms(); };
-// 友達の入室。合言葉は要らない。名前だけ入れてもらう
-W.joinOpen = async (roomId) => {
+// 友達の入室。合言葉は要らない。知り合いに教わった部屋コードと名前だけ入れてもらう。
+// 開いている部屋の一覧は出さない（一覧を出すと、♠ を見つけた人が誰でも入れてしまう）
+W.joinByCode = async () => {
+  const ce = document.getElementById("code-input");
+  const code = ((ce ? ce.value : "") || "").trim().toUpperCase();
+  state.codeDraft = code; // 間違えたときに打ち直さなくて済むよう控えておく
   const el = document.getElementById("guest-name");
   const name = ((el ? el.value : "") || "").trim();
+  if (!code) { state.error = "部屋コードを入力してください"; return render(); }
   if (!name) { state.error = "名前を入力してください"; return render(); }
   state.name = name;
   localStorage.setItem("daifugo-name", name);
   state.busy = true; state.error = ""; render();
-  const d = await post("/api/join", { roomId, name, playerId: localStorage.getItem("daifugo-pid") || "" });
+  const d = await post("/api/join", { code, name, playerId: localStorage.getItem("daifugo-pid") || "" });
   state.busy = false;
-  if (!d.ok) {
-    // その部屋が閉じた直後だとここに来る。一覧を取り直して現状を見せる
-    state.error = d.error || "入れませんでした";
-    render(); loadOpenRooms(); return;
-  }
+  if (!d.ok) { state.error = d.error || "入れませんでした"; return render(); }
+  // 次からは招待リンクが無くても ♠ から入れる
+  localStorage.setItem(CODE_KEY, code);
   connectPrivate(d.ticket, d.roomName);
 };
 W.enterPass = () => {
@@ -223,8 +243,28 @@ W.enterPass = () => {
   if (!pass) { state.error = "合言葉を入力してください"; return render(); }
   tryPass(pass, document.getElementById("pass-remember").checked);
 };
+// 知人が友達に渡すもの。これ1本で、部屋コードを入れた入口が開く
+const inviteUrl = () => `${location.origin}${location.pathname}?r=${state.privateCode}`;
+// QRはその場で読ませて終わり。リンクと違って転送されないので、渡した相手だけで止まる
+W.showQR = () => { state.qr = true; render(); };
+W.closeQR = (e) => { if (!e || e.target.classList.contains("overlay")) { state.qr = false; render(); } };
+W.copyInvite = () => {
+  if (!state.privateCode) return;
+  const url = inviteUrl();
+  navigator.clipboard.writeText(url).then(
+    () => { state.error = "招待リンクをコピーしました。友達に送ってください"; render(); },
+    () => { state.error = `コピーできませんでした。部屋コード ${state.privateCode} を伝えてください`; render(); });
+};
+// ヨコさんが知人に渡すもの（合言葉は別に伝える）。全員同じリンクでよい
+W.copyKeyLink = () => {
+  const url = `${location.origin}${location.pathname}?k=1`;
+  navigator.clipboard.writeText(url).then(
+    () => { state.error = "知人用リンクをコピーしました"; render(); },
+    () => { state.error = "コピーできませんでした。長押しで選択してください"; render(); });
+};
 W.forgetPass = () => {
   localStorage.removeItem(PASS_KEY);
+  localStorage.removeItem(CODE_KEY);
   state.menu = null;
   resetToTitle("この端末から合言葉を消しました");
 };
@@ -232,7 +272,7 @@ W.forgetPass = () => {
 // 管理画面。マスターキーは端末に残さず、操作のたびに送る
 W.openAdmin = () => { state.screen = "admin"; state.admin = null; state.error = ""; render(); };
 async function adminCall(body) {
-  if (!state.adminKey) return;
+  if (!state.adminKey && !IS_LOCAL) return;
   state.busy = true; render();
   const d = await post("/api/admin", { key: state.adminKey, ...body });
   state.busy = false;
@@ -241,8 +281,9 @@ async function adminCall(body) {
   render();
 }
 W.adminLogin = () => {
-  state.adminKey = (document.getElementById("admin-key").value || "").trim();
-  if (!state.adminKey) { state.error = "管理キーを入力してください"; return render(); }
+  const el = document.getElementById("admin-key");
+  state.adminKey = el ? (el.value || "").trim() : "";
+  if (!state.adminKey && !IS_LOCAL) { state.error = "管理キーを入力してください"; return render(); }
   adminCall({ action: "list" });
 };
 W.adminAct = (action, keyId) => adminCall({ action, keyId });
@@ -255,11 +296,13 @@ W.adminAddKey = () => {
 };
 W.adminToggle = (keyId, disabled) => adminCall({ action: "setDisabled", keyId, disabled });
 // 名前に引用符が入っても壊れないよう、合言葉そのものではなくIDを渡して引き当てる
-W.copyPass = (keyId) => {
+W.copyPass = (keyId, kind) => {
   const k = (state.admin || []).find((x) => x.id === keyId);
   if (!k) return;
-  navigator.clipboard.writeText(k.pass).then(
-    () => { state.error = `${k.name} の合言葉をコピーしました`; render(); },
+  const isCode = kind === "code";
+  const label = isCode ? "部屋コード" : "合言葉";
+  navigator.clipboard.writeText(isCode ? k.code : k.pass).then(
+    () => { state.error = `${k.name} の${label}をコピーしました`; render(); },
     () => { state.error = "コピーできませんでした。長押しで選択してください"; render(); });
 };
 // 消すものは取り返しがつかないので必ず一度止める
@@ -454,6 +497,17 @@ function confirmBox(title, body, okLabel, fn) {
       <button onclick="${fn}()" class="btn-play rounded-lg py-3 font-bold" style="flex:1">${okLabel}</button>
     </div></div></div>`;
 }
+// 招待リンクのQR。相手のスマホで読ませるだけなので、リンクを送らずに済む
+function qrOverlay() {
+  if (!state.qr || !state.privateCode) return "";
+  const svg = qrSVG(inviteUrl());
+  return `<div class="overlay overlay-center" onclick="closeQR(event)"><div class="overlay-body">
+    <p class="t-dim text-sm text-center mb-2">友達のスマホで読んでもらってください</p>
+    ${svg || `<p class="err text-center py-6">QRを作れませんでした</p>`}
+    <p class="qr-code">${esc(state.privateCode)}</p>
+    <button onclick="closeQR()" class="btn-play w-full py-3 rounded-lg font-bold mt-3">閉じる</button>
+  </div></div>`;
+}
 function menuOverlay() {
   if (!state.menu) return "";
   const r = state.room;
@@ -470,8 +524,9 @@ function menuOverlay() {
       ${isHost && playing ? `<button onclick="toggleMenu('abort')" class="btn-sub menu-item">対戦を中断してロビーへ</button>` : ""}
       ${isHost && !(r && r.private) ? `<button onclick="toggleMenu('disband')" class="btn-sub menu-item">部屋を解散する</button>` : ""}
       <button onclick="leaveRoom()" class="btn-sub menu-item">タイトルに戻る</button>
-      ${r && r.private && localStorage.getItem(PASS_KEY)
-        ? `<button onclick="forgetPass()" class="btn-sub menu-item">合言葉をこの端末から消す</button>` : ""}
+      ${r && r.private && (localStorage.getItem(PASS_KEY) || localStorage.getItem(CODE_KEY))
+        ? `<button onclick="forgetPass()" class="btn-sub menu-item">${localStorage.getItem(PASS_KEY)
+            ? "合言葉をこの端末から消す" : "この部屋をこの端末から消す"}</button>` : ""}
     </div>
     <p class="dev-note">「タイトルに戻る」は自分だけが抜けます。${r && r.private
       ? "同じ合言葉で入り直せば席に戻れます。身内ルームは解散できません（消すのは管理画面から）。"
@@ -487,8 +542,8 @@ function adminScreen() {
       <div class="w-full max-w-sm panel rounded-2xl p-6">
         <h1 class="title">管理</h1>
         <p class="t-dim text-center text-sm mb-6">身内ルームの合言葉を発行・停止します</p>
-        <input id="admin-key" type="password" autocomplete="off" placeholder="管理キー"
-          onkeydown="if(event.key==='Enter')adminLogin()" class="inp w-full mb-3 px-3 py-2 rounded-lg text-center" />
+        ${IS_LOCAL ? `<p class="t-dim text-center text-xs mb-3">ローカル開発中のため管理キーは要りません</p>` : `<input id="admin-key" type="password" autocomplete="off" placeholder="管理キー"
+          onkeydown="if(event.key==='Enter')adminLogin()" class="inp w-full mb-3 px-3 py-2 rounded-lg text-center" />`}
         <button onclick="adminLogin()" ${state.busy ? "disabled" : ""}
           class="btn-play w-full py-3 rounded-lg font-bold mb-3">${state.busy ? "確認中…" : "開く"}</button>
         <button onclick="resetToTitleBtn()" class="btn-sub w-full py-2 rounded-lg text-sm">← タイトルに戻る</button>
@@ -520,10 +575,13 @@ function adminScreen() {
           <span class="mem-name">${esc(k.name)}
             ${nowOpen ? `<span class="open-badge">いま開いています・${nowOpen.count}人</span>` : ""}
             ${k.disabled ? '<span class="err text-xs">停止中</span>' : ""}</span>
-          <code class="mem-pass">${esc(k.pass)}</code>
+          <div class="mem-line"><span class="mem-tag">合言葉</span><code class="mem-pass">${esc(k.pass)}</code>
+            <button onclick="copyPass('${k.id}','pass')" class="btn-sub">コピー</button>
+            <button onclick="adminAct('regenPass','${k.id}')" class="btn-sub">再発行</button></div>
+          <div class="mem-line"><span class="mem-tag">部屋コード</span><code class="mem-pass mem-code">${esc(k.code || "")}</code>
+            <button onclick="copyPass('${k.id}','code')" class="btn-sub">コピー</button>
+            <button onclick="adminAct('regenCode','${k.id}')" class="btn-sub">再発行</button></div>
           <span class="mem-btns">
-            <button onclick="copyPass('${k.id}')" class="btn-sub">コピー</button>
-            <button onclick="adminAct('regenPass','${k.id}')" class="btn-sub">再発行</button>
             <button onclick="adminToggle('${k.id}',${!k.disabled})" class="btn-sub">${k.disabled ? "再開" : "停止"}</button>
             <button onclick="adminAsk('deleteKey','${k.id}')" class="btn-sub">削除</button>
           </span>
@@ -534,9 +592,12 @@ function adminScreen() {
           onkeydown="if(event.key==='Enter')adminAddKey()" class="inp px-2 py-1 rounded text-sm" />
         <button onclick="adminAddKey()" class="btn-sub px-3 py-1 rounded text-sm font-bold">追加</button>
       </div>
+      <button onclick="copyKeyLink()" class="btn-sub w-full py-2 mt-3 rounded-lg text-sm">知人用リンクをコピー</button>
+      <p class="t-dim text-xs mt-1">このリンクと合言葉の2つを、上の人たちに渡します（リンクは全員同じ）。</p>
     </div>
-    <p class="dev-note">合言葉を渡すのはここに並んでいる人だけです。<strong>その友達には何も渡しません。</strong>
-    この人が部屋を開けている間、友達は ♠ の一覧からタップするだけで入れます。<br>
+    <p class="dev-note"><strong>合言葉</strong>はここに並んでいる人だけに渡します（自分の部屋を開ける鍵）。
+    その友達に渡すのは<strong>部屋コード</strong>だけです。部屋コードでは部屋を開けられないので、
+    この人が部屋を開けている間しか入れません。<br>
     漏れたと思ったら「再発行」で、その人の分だけ変わります（他の人はそのまま遊べます）。
     「停止」は登録を残したまま開けなくします。</p>
   </div>${askBox}</div>`;
@@ -610,30 +671,26 @@ function paint() {
         </div>` : ""}
         ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
       </div>
-      <button onclick="openGate()" class="corner-mark" title="身内用">♠</button></div>`;
+      ${localStorage.getItem(PASS_KEY) || localStorage.getItem(CODE_KEY)
+        ? `<button onclick="openGate()" class="corner-mark" title="身内用">♠</button>` : ""}</div>`;
     return;
   }
 
-  // 身内ルームの入口。上が友達用（開いている部屋を選ぶ）、下が鍵を持つ人用（合言葉）
+  // 身内ルームの入口。上が友達用（教わった部屋コードで入る）、下が鍵を持つ人用（合言葉）
   if (state.screen === "gate") {
-    const rooms = state.openRooms;
-    const list = rooms === null
-      ? `<p class="t-dim text-center text-sm py-3">確認中…</p>`
-      : rooms.length === 0
-        ? `<p class="t-dim text-center text-sm py-3">いま開いている部屋はありません。<br>知り合いが入るまで待ってください。</p>`
-        : rooms.map((rm) => `<button onclick="joinOpen('${rm.id}')" ${state.busy ? "disabled" : ""} class="open-room">
-            <span class="open-dot"></span><span class="open-name">${esc(rm.name)}</span>
-            <span class="open-count">${rm.count}人</span></button>`).join("");
-
     app.innerHTML = `<div class="min-h-screen flex items-center justify-center p-4">
       <div class="w-full max-w-sm panel rounded-2xl p-6">
         <div class="flex justify-end mb-2">${nightBtn()}</div>
-        <h2 class="t-accent text-center font-bold mb-1">いま遊べる部屋</h2>
-        <p class="t-dim text-center text-xs mb-3">選んでそのまま入れます</p>
-        <div class="open-list mb-3">${list}</div>
+        <h2 class="t-accent text-center font-bold mb-1">知り合いの部屋に入る</h2>
+        <p class="t-dim text-center text-xs mb-3">${state.codeDraft
+          ? "名前を入れて「入る」を押してください" : "部屋コードを聞いてから入ってください"}</p>
+        <input id="code-input" value="${esc(state.codeDraft || "")}" placeholder="部屋コード" maxlength="6"
+          autocomplete="off" spellcheck="false" oninput="this.value=this.value.toUpperCase()"
+          onkeydown="if(event.key==='Enter')joinByCode()" class="inp code-inp w-full mb-2 px-3 py-2 rounded-lg text-center" />
         <input id="guest-name" value="${esc(state.name)}" placeholder="あなたの名前"
-          class="inp w-full mb-2 px-3 py-2 rounded-lg" />
-        <button onclick="reloadOpen()" class="btn-sub w-full py-2 rounded-lg text-xs mb-4">一覧を更新</button>
+          onkeydown="if(event.key==='Enter')joinByCode()" class="inp w-full mb-2 px-3 py-2 rounded-lg" />
+        <button onclick="joinByCode()" ${state.busy ? "disabled" : ""}
+          class="btn-play w-full py-3 rounded-lg font-bold mb-4">${state.busy ? "確認中…" : "入る"}</button>
 
         <div class="divider"><span>部屋を開ける人はこちら</span></div>
         <input id="pass-input" type="password" autocomplete="off" placeholder="合言葉" value="${esc(state.passDraft || "")}"
@@ -676,8 +733,14 @@ function paint() {
       </div>
       ${r.private ? `<h2 class="t-accent text-center text-sm mb-1">身内ルーム</h2>
       <div class="roomname">${esc(r.name || "")}</div>
+      ${state.privateCode ? `<div class="roomcode">${esc(state.privateCode)}</div>
+      <div class="flex gap-2 mb-1">
+        <button onclick="showQR()" class="btn-sub flex-1 py-2 rounded-lg text-sm font-bold">QRを見せる</button>
+        <button onclick="copyInvite()" class="btn-sub flex-1 py-2 rounded-lg text-sm">リンクをコピー</button>
+      </div>
+      <p class="t-dim text-center text-xs mb-2">どちらも、開いた人は名前を入れるだけで入れます</p>` : ""}
       <p class="t-dim text-center text-xs mb-5">${r.keyPresent
-        ? "開いています。友達は ♠ の一覧からそのまま入れます"
+        ? "開いています。招待リンクを送れば、その人が入れます"
         : "閉じています。部屋の持ち主が入るまで新しい人は入れません"}</p>`
       : `<h2 class="t-accent text-center text-sm mb-1">部屋コード</h2>
       <div class="roomcode">${r.code}</div>
@@ -717,7 +780,7 @@ function paint() {
         ${r.players.length < minPlayers ? `${minPlayers}人以上で開始できます` : testOn ? "テストモードで開始" : "ゲーム開始"}</button>`
       : `<p class="t-dim text-center">ホストの開始を待っています…</p>`}
       ${state.error ? `<p class="err mt-3 text-center text-sm">${esc(state.error)}</p>` : ""}
-    </div>${menuOverlay()}</div>`;
+    </div>${qrOverlay()}${menuOverlay()}</div>`;
     return;
   }
 
@@ -860,4 +923,8 @@ function paint() {
 }
 
 document.body.classList.toggle("night", state.night);
+// 招待リンクで来た人は、部屋コードを入れた状態の入口から始める
+if (ENTRY_CODE) { state.screen = "gate"; state.codeDraft = ENTRY_CODE; }
 render();
+// 知人用リンクは openGate に任せる（覚えている端末はそのまま部屋が開く）
+if (ENTRY_KEY && !ENTRY_CODE) openGate();
