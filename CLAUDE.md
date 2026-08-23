@@ -88,6 +88,30 @@ npx wrangler deploy
 - 同じ `playerId` の接続が同時に2つ以上部屋に繋がった場合の挙動は未対応
   （`this.sessions` は `ws → playerId` の Map なので、後から繋いだ方が優先される想定）
 
+## 管理画面（プレイヤー台帳・活動ログ）
+
+`ActivityLog`（`src/index.js`・バインディング `LOG`・`idFromName("log")` の1インスタンス
+だけ）が、`DaifugoRoom` の `create`／新規 `join` からfire-and-forgetで送られる出来事を、
+**同じ入力から2つの見え方**に整形して保存する：
+
+```
+パターンA：活動ログ      … events配列（直近500件）。{ts, kind, name, code, playerId}
+パターンB：プレイヤー台帳 … players[playerId]。初回・最終・使った名前(直近10)・回数を集計
+```
+
+- `DaifugoRoom.logEvent()` が呼び出し口。**結果を待たず、失敗しても無視する**
+  （`.catch(() => {})`）。ログが1回落ちても対戦は絶対に止めない
+- 記録するのは「新規参加」のときだけ。再接続（既に `r.players` にいる `playerId` が
+  もう一度 `join`/`enter` してくる）では呼ばない
+- 管理画面は `?admin=1` で開く。**プレイヤー向けのどの画面にもリンクしない**隠しページ
+  （マイページとは無関係の別物）。読んだら `history.replaceState` でURLから消す
+- 管理キーの検証は `PrivateRegistry`/`UserRegistry` と同じ形（`waitSec`/`addFail`/`clearFail`）。
+  ローカル開発（`DAIFUGO_DEV === "1"`）ではキー不要
+- **`playerId` は「永久に変わらない個人ID」ではない。** 端末やブラウザが変わると別物になる
+  （iOS Safariの7日自動削除等）。マイページで手動リンクした場合のみ台帳上も同一人物として
+  集約される。この限界を管理画面の注記に隠さず明記すること
+- `players` は間引かずに増え続ける設計。件数が問題になったら間引きを検討する
+
 ## データモデル（room オブジェクト）
 
 Durable Objectの `this.room` がゲーム状態そのもの。主なフィールド：

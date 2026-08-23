@@ -49,6 +49,8 @@ const state = {
   testMode: false, showGameRules: false, menu: null, code: "",
   // 端末のIDを見せる／合わせるパネル。null="閉じている"・"show"="見せる面"・"paste"="合わせる面"
   idPanel: null, idPasteConfirm: null,
+  // 管理画面（プレイヤー台帳・活動ログ）。プレイヤー向けのどの画面にもリンクしない隠しページ
+  adminKey: "", adminData: null, adminTab: "players", adminBusy: false,
 };
 localStorage.setItem("daifugo-pid", state.playerId);
 
@@ -56,6 +58,18 @@ localStorage.setItem("daifugo-pid", state.playerId);
 // 端末に記憶はしない（通常URLで開けば必ずOFF）。記憶すると、通常URLを開いた
 // つもりでも開発者メニューが出続けて紛らわしいため。
 const IS_DEV = new URLSearchParams(location.search).get("dev") === "1";
+// ローカル開発（wrangler dev）かどうか。管理画面の管理キー入力欄を省くためだけに使う。
+// 実際に通すか決めるのはサーバー側（.dev.vars の DAIFUGO_DEV）なので、ここは見た目だけ
+const IS_LOCAL = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+// 管理画面の入口。読んだら消す（履歴やスクリーンショットにURLの跡を残さないため）
+const ENTRY_ADMIN = new URLSearchParams(location.search).get("admin") === "1";
+if (ENTRY_ADMIN) {
+  const q = new URLSearchParams(location.search);
+  q.delete("admin");
+  const rest = q.toString();
+  history.replaceState(null, "", location.pathname + (rest ? "?" + rest : ""));
+  state.screen = "adminlog";
+}
 // 使わなくなった値の後始末（開発者モードの記憶方式・身内ルームの合言葉と部屋コード）
 for (const k of ["daifugo-dev", "daifugo-pass", "daifugo-code"]) localStorage.removeItem(k);
 
@@ -203,6 +217,34 @@ W.applyIdPaste = () => {
   localStorage.setItem("daifugo-pid", state.idPasteConfirm);
   location.reload();
 };
+
+// ---------- 管理画面（プレイヤー台帳・活動ログ） ----------
+// プレイヤー向けのどの画面にもリンクしない隠しページ。?admin=1 でだけ入れる
+W.adminLogin = () => {
+  const el = document.getElementById("admin-key-input");
+  state.adminKey = el ? el.value : "";
+  state.adminBusy = true;
+  state.error = "";
+  render();
+  fetch("/api/admin/log", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: state.adminKey }),
+  })
+    .then((r) => r.json())
+    .then((d) => {
+      state.adminBusy = false;
+      if (!d.ok) { state.error = d.error || "失敗しました"; state.adminData = null; return render(); }
+      state.adminData = d;
+      state.error = "";
+      render();
+    })
+    .catch(() => {
+      state.adminBusy = false;
+      state.error = "つながりませんでした";
+      render();
+    });
+};
+W.adminSetTab = (tab) => { state.adminTab = tab; render(); };
 W.abortGame = () => { state.menu = null; send({ type: "abort", asPlayerId: null }); };
 W.disbandRoom = () => { state.menu = null; send({ type: "disband", asPlayerId: null }); };
 W.toggleTestMode = () => { state.testMode = !state.testMode; render(); };
@@ -497,6 +539,68 @@ function paint() {
         ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
         <button onclick="openIdPanel()" class="id-link">マイページ</button>
       </div></div>${idOverlay()}`;
+    return;
+  }
+
+  if (state.screen === "adminlog") {
+    if (!state.adminData) {
+      app.innerHTML = `<div class="min-h-screen flex items-center justify-center p-4">
+        <div class="w-full max-w-sm panel rounded-2xl p-6">
+          <h1 class="title">管理</h1>
+          <p class="t-dim text-center text-sm mb-5">プレイヤー台帳・活動ログ</p>
+          ${IS_LOCAL ? `<p class="t-dim text-center text-xs mb-3">ローカル開発中のため管理キーは要りません</p>` : `<input id="admin-key-input" type="password" autocomplete="off" placeholder="管理キー"
+            onkeydown="if(event.key==='Enter')adminLogin()" class="inp w-full mb-3 px-3 py-2 rounded-lg text-center" />`}
+          <button onclick="adminLogin()" ${state.adminBusy ? "disabled" : ""}
+            class="btn-play w-full py-3 rounded-lg font-bold">${state.adminBusy ? "確認中…" : "開く"}</button>
+          ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
+        </div></div>`;
+      return;
+    }
+    const d = state.adminData;
+    const players = Object.entries(d.players || {}).sort((a, b) => b[1].lastSeenAt - a[1].lastSeenAt);
+    const fmt = (ts) => new Date(ts).toLocaleString("ja-JP");
+    app.innerHTML = `<div class="min-h-screen p-4"><div class="max-w-2xl mx-auto">
+      <div class="admin-head">
+        <h2 class="t-accent text-lg font-bold">管理</h2>
+        <span class="flex gap-2">${nightBtn()}
+          <button onclick="location.reload()" class="btn-sub px-3 py-1 rounded-lg text-sm">閉じる</button></span>
+      </div>
+      <p class="t-dim text-xs mb-3">個人ID（端末のID）は端末やブラウザが変わると別物になることがあります。
+      同じIDだからといって同一人物とは限りません。</p>
+      <div class="flex gap-2 mb-3">
+        <button onclick="adminSetTab('players')" class="btn-sub flex-1 py-2 rounded-lg text-sm ${state.adminTab === "players" ? "font-bold" : ""}">プレイヤー台帳</button>
+        <button onclick="adminSetTab('events')" class="btn-sub flex-1 py-2 rounded-lg text-sm ${state.adminTab === "events" ? "font-bold" : ""}">最近の出来事</button>
+      </div>
+      ${state.adminTab === "players" ? `
+        <div class="panel rounded-xl p-3 admin-table-wrap">
+          <table class="admin-table"><thead><tr>
+            <th>個人ID</th><th>初回</th><th>最終</th><th>使った名前</th><th>作成/参加</th>
+          </tr></thead><tbody>
+            ${players.length ? players.map(([pid, p]) => `<tr>
+              <td class="id-text-sm">${esc(pid.slice(0, 8))}</td>
+              <td>${fmt(p.firstSeenAt)}</td>
+              <td>${fmt(p.lastSeenAt)}</td>
+              <td>${(p.names || []).map(esc).join("、")}</td>
+              <td>${p.createCount || 0} / ${p.joinCount || 0}</td>
+            </tr>`).join("") : `<tr><td colspan="5" class="t-dim text-center py-3">まだ記録がありません</td></tr>`}
+          </tbody></table>
+        </div>
+      ` : `
+        <div class="panel rounded-xl p-3 admin-table-wrap">
+          <table class="admin-table"><thead><tr>
+            <th>時刻</th><th>操作</th><th>名前</th><th>部屋コード</th><th>個人ID</th>
+          </tr></thead><tbody>
+            ${d.events && d.events.length ? d.events.map((e) => `<tr>
+              <td>${fmt(e.ts)}</td>
+              <td>${e.kind === "create" ? "作成" : "参加"}</td>
+              <td>${esc(e.name)}</td>
+              <td>${esc(e.code)}</td>
+              <td class="id-text-sm">${esc((e.playerId || "").slice(0, 8))}</td>
+            </tr>`).join("") : `<tr><td colspan="5" class="t-dim text-center py-3">まだ記録がありません</td></tr>`}
+          </tbody></table>
+        </div>
+      `}
+    </div></div>`;
     return;
   }
 

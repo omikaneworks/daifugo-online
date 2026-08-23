@@ -131,6 +131,15 @@ button:disabled{opacity:.3}
   background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px}
 /* IDのQR。ナイトモードでも読めるよう、白地は qr.js 側で固定にしている */
 .qr-svg{display:block;width:100%;max-width:220px;margin:10px auto 0;border-radius:6px}
+/* 管理画面（プレイヤー台帳・活動ログ）。誰にもリンクしない隠しページ用 */
+.admin-head{display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center;margin-bottom:12px}
+.admin-table-wrap{overflow-x:auto}
+.admin-table{width:100%;border-collapse:collapse;font-size:.82rem;white-space:nowrap}
+.admin-table th{text-align:left;color:var(--dim);font-weight:600;padding:6px 10px;
+  border-bottom:1px solid var(--border);font-size:.75rem}
+.admin-table td{padding:6px 10px;border-bottom:1px solid var(--border);color:var(--text)}
+.admin-table tr:last-child td{border-bottom:none}
+.id-text-sm{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;color:var(--dim)}
 /* 保留アクション（7渡し / 10捨て / Qボンバー）のポップアップ。
    7渡し・10捨ては手札から札を選ぶ操作が要るので、画面を塞ぐモーダルにはできない。
    手札パネルを基準に、そのすぐ上へ浮かせている（.panel-bottom が位置の基準）。 */

@@ -9,7 +9,9 @@
   },
   "durable_objects": {
     "bindings": [
-      { "name": "ROOM", "class_name": "DaifugoRoom" }
+      { "name": "ROOM", "class_name": "DaifugoRoom" },
+      // 活動ログ・プレイヤー台帳。インスタンスは1つだけ使う
+      { "name": "LOG", "class_name": "ActivityLog" }
     ]
   },
   // v2 で足した身内ルームの台帳は v3 で削除した。
@@ -17,7 +19,8 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["DaifugoRoom"] },
     { "tag": "v2", "new_sqlite_classes": ["PrivateRegistry"] },
-    { "tag": "v3", "deleted_classes": ["PrivateRegistry"] }
+    { "tag": "v3", "deleted_classes": ["PrivateRegistry"] },
+    { "tag": "v4", "new_sqlite_classes": ["ActivityLog"] }
   ],
   "observability": {
     "enabled": true

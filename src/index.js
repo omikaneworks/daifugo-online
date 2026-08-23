@@ -103,6 +103,16 @@ export class DaifugoRoom {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  // 活動ログへ1件送るだけ。結果は待たない・失敗しても対戦は絶対に止めない
+  logEvent(kind, name, code, playerId) {
+    this.env.LOG.get(this.env.LOG.idFromName("log"))
+      .fetch("https://log/record", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind, name, code, playerId }),
+      })
+      .catch(() => {});
+  }
+
   async persistAndBroadcast() {
     await this.state.storage.put("room", this.room);
     for (const [ws, pid] of this.sessions.entries()) {
@@ -220,6 +230,7 @@ export class DaifugoRoom {
       }
       this.room = this.newRoom(code, playerId, msg.name);
       this.sessions.set(ws, playerId);
+      this.logEvent("create", msg.name, code, playerId);
       await this.persistAndBroadcast();
       return;
     }
@@ -253,6 +264,7 @@ export class DaifugoRoom {
         if (r.players.length >= 6) { ws.send(JSON.stringify({ type: "error", message: "満員です（最大6人）" })); return; }
         r.players.push({ id: playerId, name: myName, hand: [], handCount: 0, finished: false, finishOrder: null });
         r.log.push(`${myName} が参加しました`);
+        this.logEvent("join", myName, r.code, playerId);
       }
       // ホストが繋がっていない部屋は中断も解散も誰にもできなくなる。
       // 放置された部屋を自力で片付けられるよう、入ってきた人にホストを渡す。
@@ -1100,6 +1112,133 @@ export class DaifugoRoom {
   }
 }
 
+// ============ 活動ログ・プレイヤー台帳（ActivityLog） ============
+// 部屋を作った・参加した、という出来事から2種類のデータを同時に作る。
+// インスタンスは1つだけ（idFromName("log")）。別のデータベースは使わない。
+//
+//   パターンA：活動ログ    … 「いつ何が起きたか」の生の記録を時系列で積む（直近500件）
+//   パターンB：プレイヤー台帳 … playerId ごとに1件。初回・最終・使った名前・回数を集計。
+//                            同じIDが違う名前で来ても、台帳上は同じ1レコードとして追える
+//
+// playerId（daifugo-pid）は「永久に変わらない個人ID」ではない。端末やブラウザが
+// 変わると別物になりうる。この限界を隠さず、管理画面の注記に明記すること。
+
+const LOG_FAIL_LIMIT = 5;
+const LOG_FAIL_BASE_MS = 60 * 1000;
+const LOG_FAIL_MAX_STEP = 6;
+const LOG_FAIL_RESET_MS = 60 * 60 * 1000;
+const EVENTS_MAX = 500;   // 直近この件数だけ残す
+const NAMES_MAX = 10;     // 1人あたり、直近この個数の名前だけ残す
+
+const logJsonRes = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json" } });
+
+// 一致するまでの時間で中身を推測されないよう、必ず最後まで比較する
+function logSafeEqual(a, b) {
+  const enc = new TextEncoder();
+  const x = enc.encode(String(a == null ? "" : a));
+  const y = enc.encode(String(b == null ? "" : b));
+  let diff = x.length ^ y.length;
+  const n = Math.max(x.length, y.length);
+  for (let i = 0; i < n; i++) diff |= (x[i] || 0) ^ (y[i] || 0);
+  return diff === 0;
+}
+
+export class ActivityLog {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+
+  // ---- 総当たり対策：同じ相手が続けて外したら待たせる（UserRegistryと同じ形） ----
+  async waitSec(key) {
+    const fails = (await this.state.storage.get("fails")) || {};
+    const f = fails[key];
+    if (!f || !f.until || f.until < Date.now()) return 0;
+    return Math.ceil((f.until - Date.now()) / 1000);
+  }
+  async addFail(key) {
+    const fails = (await this.state.storage.get("fails")) || {};
+    const now = Date.now();
+    // 掃除の基準は「最後に外した時刻(at)」。待ち時間(until)で見ると、
+    // まだ待たせる前（until=0）の記録まで消えてしまい、回数がいつまでも溜まらない
+    for (const k of Object.keys(fails)) if ((fails[k].at || 0) < now - 86400000) delete fails[k];
+    const prev = fails[key];
+    const f = prev && now - (prev.at || 0) < LOG_FAIL_RESET_MS ? prev : { n: 0, until: 0 };
+    f.n += 1;
+    f.at = now;
+    if (f.n >= LOG_FAIL_LIMIT) f.until = now + LOG_FAIL_BASE_MS * 2 ** Math.min(f.n - LOG_FAIL_LIMIT, LOG_FAIL_MAX_STEP);
+    fails[key] = f;
+    await this.state.storage.put("fails", fails);
+  }
+  async clearFail(key) {
+    const fails = (await this.state.storage.get("fails")) || {};
+    if (fails[key]) { delete fails[key]; await this.state.storage.put("fails", fails); }
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    let body = {};
+    try { body = await request.json(); } catch { body = {}; }
+
+    if (url.pathname === "/record") return this.record(body);
+    if (url.pathname === "/api/admin/log") return this.adminLog(body, request);
+    return new Response("Not found", { status: 404 });
+  }
+
+  // DaifugoRoom からだけ呼ばれる内部経路。認証不要（Workerのルーターがこの経路を
+  // ブラウザへは公開していない）。fire-and-forgetで呼ばれるので失敗しても影響は無い
+  async record(body) {
+    const ts = Date.now();
+    const kind = body.kind === "create" || body.kind === "join" ? body.kind : null;
+    const playerId = String(body.playerId || "");
+    const name = String(body.name || "").slice(0, 20);
+    const code = String(body.code || "").slice(0, 20);
+    if (!kind || !playerId) return logJsonRes({ ok: false });
+
+    // パターンA：活動ログに1件追記し、直近500件だけ残す
+    const events = (await this.state.storage.get("events")) || [];
+    events.push({ ts, kind, name, code, playerId });
+    while (events.length > EVENTS_MAX) events.shift();
+    await this.state.storage.put("events", events);
+
+    // パターンB：プレイヤー台帳をその場で更新する
+    const players = (await this.state.storage.get("players")) || {};
+    const p = players[playerId] || { firstSeenAt: ts, lastSeenAt: ts, names: [], createCount: 0, joinCount: 0 };
+    p.lastSeenAt = ts;
+    if (name && !p.names.includes(name)) {
+      p.names.push(name);
+      while (p.names.length > NAMES_MAX) p.names.shift();
+    }
+    if (kind === "create") p.createCount = (p.createCount || 0) + 1;
+    else p.joinCount = (p.joinCount || 0) + 1;
+    players[playerId] = p;
+    await this.state.storage.put("players", players);
+
+    return logJsonRes({ ok: true });
+  }
+
+  // 管理画面から。管理キーで保護する（PrivateRegistry・UserRegistryと同じ考え方）
+  async adminLog(body, request) {
+    const ip = request.headers.get("CF-Connecting-IP") || "local";
+    const devOpen = this.env.DAIFUGO_DEV === "1";
+    if (!devOpen) {
+      const key = "admin:" + ip;
+      const wait = await this.waitSec(key);
+      if (wait > 0) return logJsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
+      const master = this.env.DAIFUGO_MASTER_KEY;
+      if (!master) return logJsonRes({ ok: false, error: "管理キーが未設定です（wrangler secret put DAIFUGO_MASTER_KEY）" });
+      if (!logSafeEqual(master, body.key)) {
+        await this.addFail(key);
+        return logJsonRes({ ok: false, error: "管理キーが違います" });
+      }
+      await this.clearFail(key);
+    }
+    const events = ((await this.state.storage.get("events")) || []).slice().reverse();
+    const players = (await this.state.storage.get("players")) || {};
+    return logJsonRes({ ok: true, events, players });
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -1115,6 +1254,12 @@ export default {
       if (!code) return new Response("Bad room code", { status: 400 });
       const id = env.ROOM.idFromName(code);
       return env.ROOM.get(id).fetch(request);
+    }
+
+    // 管理画面（プレイヤー台帳・活動ログ）。誰にもリンクしない隠しページ用のAPI
+    if (url.pathname === "/api/admin/log") {
+      if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+      return env.LOG.get(env.LOG.idFromName("log")).fetch(request);
     }
 
     // 静的ファイルの配信は GET/HEAD だけ。本文つきの POST を流すと配信側が落ちる
