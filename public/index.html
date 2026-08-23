@@ -166,6 +166,29 @@ button:disabled{opacity:.3}
 .overlay-center .overlay-body{border-radius:16px;width:calc(100% - 32px);max-width:360px;
   border-color:var(--accent);border-width:2px;padding:14px}
 
+/* ---- 身元まわり（ユーザーコード・マイページ） ---- */
+/* トップに出す自分の名札。押すとマイページへ */
+.me-chip{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;
+  margin-bottom:16px;padding:8px;border:1px solid var(--border);border-radius:10px;
+  background:none;color:var(--text);font-weight:700;cursor:pointer}
+.me-chip:hover{border-color:var(--accent)}
+.me-chip-code{color:var(--dim);font-weight:400;font-size:.8rem;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.06em}
+/* 人に見せるコード。読み上げてもらうことがあるので大きく、字間を空ける */
+.user-code{text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:1.6rem;font-weight:700;letter-spacing:.12em;color:var(--accent);margin:2px 0 6px}
+/* 秘密のカギ。長いので折り返す。危険なものだと分かるよう枠で囲う */
+.secret-box{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9rem;
+  word-break:break-all;color:var(--text);background:var(--bg);border:1px solid var(--err);
+  border-radius:8px;padding:8px;margin-bottom:8px}
+.warn{color:var(--err)}
+/* コードの入力欄。読み違えないよう字間を空ける */
+.code-inp{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.14em;font-weight:700}
+/* ユーザーコードのQR。ナイトモードでも読めるよう、白地は qr.js 側で固定にしている */
+.qr-svg{display:block;width:100%;max-width:220px;margin:0 auto;border-radius:6px}
+.mem-line{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.mem-line .btn-sub{padding:5px 10px;border-radius:6px;font-size:.78rem;white-space:nowrap}
+
 /* Tailwind の文字サイズユーティリティを底上げする。
    cdn.tailwindcss.com は生成したCSSを後から差し込むため、
    body を付けて詳細度で勝たせている（同点だと後勝ちで負けるため）。 */
