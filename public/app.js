@@ -381,7 +381,7 @@ function menuOverlay() {
       ${isHost && playing ? `<button onclick="toggleMenu('abort')" class="btn-sub menu-item">対戦を中断してロビーへ</button>` : ""}
       ${isHost ? `<button onclick="toggleMenu('disband')" class="btn-sub menu-item">部屋を解散する</button>` : ""}
       <button onclick="leaveRoom()" class="btn-sub menu-item">タイトルに戻る</button>
-      <button onclick="openIdPanel()" class="btn-sub menu-item">この端末のID</button>
+      <button onclick="openIdPanel()" class="btn-sub menu-item">マイページ</button>
     </div>
     <p class="dev-note">「タイトルに戻る」は自分だけが抜けます。同じ端末なら、同じ部屋コードで入り直せば席に戻れます。
     ${isHost ? "" : "「中断」はホストだけが操作できます。"}</p>
@@ -403,8 +403,10 @@ function idOverlay() {
   }
   const showMode = state.idPanel === "show";
   return `<div class="overlay overlay-center" onclick="closeIdPanel(event)"><div class="overlay-body">
-    <div class="overlay-head"><span>この端末のID</span>
+    <div class="overlay-head"><span>マイページ</span>
       <button onclick="closeIdPanel()" class="btn-sub px-3 py-1 rounded-lg text-sm">閉じる</button></div>
+    <p class="t-dim text-xs text-center mb-3">パソコンとスマホなど、複数の端末を同じ人として
+    使いたいときに、ここでIDを合わせられます。</p>
     <div class="flex gap-2 mb-3">
       <button onclick="showIdShowMode()" class="btn-sub flex-1 py-2 rounded-lg text-sm ${showMode ? "font-bold" : ""}">このIDを見せる</button>
       <button onclick="showIdPasteMode()" class="btn-sub flex-1 py-2 rounded-lg text-sm ${!showMode ? "font-bold" : ""}">他の端末に合わせる</button>
@@ -415,8 +417,7 @@ function idOverlay() {
       ${qrSVG(state.playerId) || ""}
       <button onclick="copyMyId()" class="btn-sub w-full py-2 mt-3 rounded-lg text-sm">IDをコピー</button>
     ` : `
-      <p class="t-dim text-xs text-center mb-2">パソコンとスマホなど、別の端末を同じ人として使いたいときだけ使います。
-      普段は何もしなくて構いません。</p>
+      <p class="t-dim text-xs text-center mb-2">先ほどの端末で表示したIDを、ここに貼り付けてください</p>
       <input id="id-paste-input" placeholder="貼り付けたIDを入れる" autocomplete="off" spellcheck="false"
         class="inp w-full mb-2 px-3 py-2 rounded-lg text-center id-text" />
       <button onclick="confirmIdPaste()" class="btn-play w-full py-3 rounded-lg font-bold">このIDに合わせる</button>
@@ -494,7 +495,7 @@ function paint() {
           無ければその場で作られ、すでにあれば参加します。名前が空なら「開発者」になります。</p>
         </div>` : ""}
         ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
-        <button onclick="openIdPanel()" class="id-link">この端末のID</button>
+        <button onclick="openIdPanel()" class="id-link">マイページ</button>
       </div></div>${idOverlay()}`;
     return;
   }
