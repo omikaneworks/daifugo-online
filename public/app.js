@@ -1,4 +1,5 @@
 import { RULE_CATEGORIES, buildDefaultRules, PRESETS, presetRules, sameRules } from "./rules.js";
+import { qrSVG } from "./qr.js";
 
 // --- 自作プリセット（この端末に保存される）---
 const CUSTOM_KEY = "daifugo-presets";
@@ -46,6 +47,8 @@ const state = {
   screen: "home", room: null, error: "", selected: [], ws: null,
   showRules: false, openCat: null, draftRules: null,
   testMode: false, showGameRules: false, menu: null, code: "",
+  // 端末のIDを見せる／合わせるパネル。null="閉じている"・"show"="見せる面"・"paste"="合わせる面"
+  idPanel: null, idPasteConfirm: null,
 };
 localStorage.setItem("daifugo-pid", state.playerId);
 
@@ -125,6 +128,7 @@ function resetToTitle(message) {
   Object.assign(state, {
     ws: null, room: null, code: "", draftRules: null, selected: [], menu: null,
     showRules: false, openCat: null, testMode: false, showGameRules: false,
+    idPanel: null, idPasteConfirm: null,
     error: message || "", screen: "home",
   });
   render();
@@ -172,6 +176,33 @@ W.leaveRoom = () => {
 };
 W.toggleMenu = (v) => { state.menu = v || null; render(); };
 W.closeMenu = (e) => { if (e.target.classList.contains("overlay")) { state.menu = null; render(); } };
+
+// ---------- 端末のID（パソコンとスマホを同じ人として使いたいときだけ使う） ----------
+// daifugo-pid は「本人確認」ではなく「今回はこの人として扱う」というラベルでしかないので、
+// 値をそのままコピーして別の端末に上書きすれば、それだけで同じ人として扱われる
+W.openIdPanel = () => { state.menu = null; state.idPanel = "show"; state.idPasteConfirm = null; render(); };
+W.closeIdPanel = (e) => { if (!e || e.target.classList.contains("overlay")) { state.idPanel = null; render(); } };
+W.showIdPasteMode = () => { state.idPanel = "paste"; render(); };
+W.showIdShowMode = () => { state.idPanel = "show"; render(); };
+W.copyMyId = () => {
+  navigator.clipboard.writeText(state.playerId).then(
+    () => { state.error = "IDをコピーしました"; render(); },
+    () => { state.error = "コピーできませんでした。長押しで選択してください"; render(); });
+};
+W.confirmIdPaste = () => {
+  const el = document.getElementById("id-paste-input");
+  const v = ((el ? el.value : "") || "").trim();
+  // ここは秘密情報ではないので厳密な検証は要らない。UUIDらしい形かどうかだけ見る
+  if (!/^[0-9a-f-]{20,40}$/i.test(v)) { state.error = "IDの形が正しくありません"; return render(); }
+  if (v === state.playerId) { state.error = "もう同じIDです"; return render(); }
+  state.idPasteConfirm = v;
+  render();
+};
+W.cancelIdPasteConfirm = () => { state.idPasteConfirm = null; render(); };
+W.applyIdPaste = () => {
+  localStorage.setItem("daifugo-pid", state.idPasteConfirm);
+  location.reload();
+};
 W.abortGame = () => { state.menu = null; send({ type: "abort", asPlayerId: null }); };
 W.disbandRoom = () => { state.menu = null; send({ type: "disband", asPlayerId: null }); };
 W.toggleTestMode = () => { state.testMode = !state.testMode; render(); };
@@ -350,9 +381,47 @@ function menuOverlay() {
       ${isHost && playing ? `<button onclick="toggleMenu('abort')" class="btn-sub menu-item">対戦を中断してロビーへ</button>` : ""}
       ${isHost ? `<button onclick="toggleMenu('disband')" class="btn-sub menu-item">部屋を解散する</button>` : ""}
       <button onclick="leaveRoom()" class="btn-sub menu-item">タイトルに戻る</button>
+      <button onclick="openIdPanel()" class="btn-sub menu-item">この端末のID</button>
     </div>
     <p class="dev-note">「タイトルに戻る」は自分だけが抜けます。同じ端末なら、同じ部屋コードで入り直せば席に戻れます。
     ${isHost ? "" : "「中断」はホストだけが操作できます。"}</p>
+  </div></div>`;
+}
+// パソコンとスマホを同じ人として使いたいときだけ使うパネル。普段は開く必要が無い
+function idOverlay() {
+  if (!state.idPanel) return "";
+  if (state.idPasteConfirm) {
+    return `<div class="overlay overlay-center"><div class="overlay-body">
+      <p class="pop-t">この端末をそのIDに合わせますか？</p>
+      <p class="pop-d">今までこの端末で遊んだ記録は、別のIDのまま残ります。
+      以後この端末は貼り付けたIDの人として扱われます。</p>
+      <div class="flex gap-2 mt-4">
+        <button onclick="cancelIdPasteConfirm()" class="btn-sub rounded-lg py-3 font-bold" style="flex:1">やめる</button>
+        <button onclick="applyIdPaste()" class="btn-play rounded-lg py-3 font-bold" style="flex:1">合わせる</button>
+      </div>
+    </div></div>`;
+  }
+  const showMode = state.idPanel === "show";
+  return `<div class="overlay overlay-center" onclick="closeIdPanel(event)"><div class="overlay-body">
+    <div class="overlay-head"><span>この端末のID</span>
+      <button onclick="closeIdPanel()" class="btn-sub px-3 py-1 rounded-lg text-sm">閉じる</button></div>
+    <div class="flex gap-2 mb-3">
+      <button onclick="showIdShowMode()" class="btn-sub flex-1 py-2 rounded-lg text-sm ${showMode ? "font-bold" : ""}">このIDを見せる</button>
+      <button onclick="showIdPasteMode()" class="btn-sub flex-1 py-2 rounded-lg text-sm ${!showMode ? "font-bold" : ""}">他の端末に合わせる</button>
+    </div>
+    ${showMode ? `
+      <p class="t-dim text-xs text-center mb-2">別の端末で「他の端末に合わせる」を開き、これを貼り付けてください</p>
+      <p class="id-text">${esc(state.playerId)}</p>
+      ${qrSVG(state.playerId) || ""}
+      <button onclick="copyMyId()" class="btn-sub w-full py-2 mt-3 rounded-lg text-sm">IDをコピー</button>
+    ` : `
+      <p class="t-dim text-xs text-center mb-2">パソコンとスマホなど、別の端末を同じ人として使いたいときだけ使います。
+      普段は何もしなくて構いません。</p>
+      <input id="id-paste-input" placeholder="貼り付けたIDを入れる" autocomplete="off" spellcheck="false"
+        class="inp w-full mb-2 px-3 py-2 rounded-lg text-center id-text" />
+      <button onclick="confirmIdPaste()" class="btn-play w-full py-3 rounded-lg font-bold">このIDに合わせる</button>
+    `}
+    ${state.error ? `<p class="err mt-3 text-center text-sm">${esc(state.error)}</p>` : ""}
   </div></div>`;
 }
 function rulesPanel(editable) {
@@ -425,7 +494,8 @@ function paint() {
           無ければその場で作られ、すでにあれば参加します。名前が空なら「開発者」になります。</p>
         </div>` : ""}
         ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
-      </div></div>`;
+        <button onclick="openIdPanel()" class="id-link">この端末のID</button>
+      </div></div>${idOverlay()}`;
     return;
   }
 
@@ -487,7 +557,7 @@ function paint() {
         ${r.players.length < minPlayers ? `${minPlayers}人以上で開始できます` : testOn ? "テストモードで開始" : "ゲーム開始"}</button>`
       : `<p class="t-dim text-center">ホストの開始を待っています…</p>`}
       ${state.error ? `<p class="err mt-3 text-center text-sm">${esc(state.error)}</p>` : ""}
-    </div>${menuOverlay()}</div>`;
+    </div>${menuOverlay()}${idOverlay()}</div>`;
     return;
   }
 
@@ -525,7 +595,7 @@ function paint() {
           ${handRow(hand)}
           ${state.error ? `<p class="err text-xs mb-2 text-center">${esc(state.error)}</p>` : ""}
           <button onclick="submitExchange()" class="btn-play w-full py-3 rounded-lg font-bold">${state.selected.length}/${task.n} 枚を渡す</button>
-        </div>` : ""}${gameRulesOverlay()}${menuOverlay()}</div>`;
+        </div>` : ""}${gameRulesOverlay()}${menuOverlay()}${idOverlay()}</div>`;
       return;
     }
 
@@ -591,7 +661,7 @@ function paint() {
           <button onclick="submitPass()" ${!canAct || !r.field ? "disabled" : ""} class="btn-pass rounded-lg font-bold" style="flex:4 1 0%">パス</button>
           <button onclick="submitPlay()" ${!canAct ? "disabled" : ""} class="btn-play rounded-lg font-bold" style="flex:6 1 0%">出す</button>
         </div>`}
-      </div>${popModal}${gameRulesOverlay()}${menuOverlay()}</div>`;
+      </div>${popModal}${gameRulesOverlay()}${menuOverlay()}${idOverlay()}</div>`;
     return;
   }
 
@@ -616,7 +686,7 @@ function paint() {
       </div>
       ${isHost ? `<button onclick="rematch()" class="btn-play px-6 py-3 rounded-lg font-bold">もう一度遊ぶ</button>` : `<p class="t-dim text-sm">ホストの操作を待っています…</p>`}
       <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm mt-3">タイトルに戻る</button>
-    </div>${menuOverlay()}`;
+    </div>${menuOverlay()}${idOverlay()}`;
     return;
   }
 

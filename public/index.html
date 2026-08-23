@@ -119,6 +119,18 @@ button:disabled{opacity:.3}
 .devbox{border:1px dashed var(--border);border-radius:10px;padding:10px;margin-bottom:8px}
 .dev-t{font-size:.82rem;color:var(--dim);margin:0 0 6px;letter-spacing:.05em}
 .dev-note{font-size:.78rem;color:var(--dim);line-height:1.45;margin:6px 0 0}
+/* パソコンとスマホを同じ人として使いたいときだけ使う「端末のID」入口。
+   普段は押す人がほぼいない大きさ・色にして視界の邪魔をしない */
+.id-link{display:block;width:100%;margin-top:14px;background:none;border:none;
+  color:var(--dim);opacity:.55;font-size:.78rem;text-align:center;
+  text-decoration:underline;cursor:pointer}
+.id-link:hover{opacity:.85}
+/* 端末のID・UUIDの表示。長い英数字なので等幅にして折り返す */
+.id-text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;
+  word-break:break-all;text-align:center;color:var(--text);
+  background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px}
+/* IDのQR。ナイトモードでも読めるよう、白地は qr.js 側で固定にしている */
+.qr-svg{display:block;width:100%;max-width:220px;margin:10px auto 0;border-radius:6px}
 /* 保留アクション（7渡し / 10捨て / Qボンバー）のポップアップ。
    7渡し・10捨ては手札から札を選ぶ操作が要るので、画面を塞ぐモーダルにはできない。
    手札パネルを基準に、そのすぐ上へ浮かせている（.panel-bottom が位置の基準）。 */
