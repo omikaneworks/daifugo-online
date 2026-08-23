@@ -17,6 +17,14 @@ const PILE_MAX = 3;
 
 const DEFAULT_RULES = buildDefaultRules();
 
+// 部屋の合言葉（＝部屋コード）の正規化。前後の空白を落として大文字化し、
+// 長さだけ見る（文字種は特に制限しない。日本語も通す）。おかしければ null
+function normalizeCode(raw) {
+  const c = String(raw == null ? "" : raw).trim().toUpperCase();
+  if (c.length < 2 || c.length > 16) return null;
+  return c;
+}
+
 function buildDeck(jokerCount) {
   const deck = [];
   for (const s of SUITS) for (const r of RANKS) deck.push({ id: `${s}-${r}`, suit: s, rank: r });
@@ -60,9 +68,6 @@ export class DaifugoRoom {
     this.state = state;
     this.env = env;
     this.sessions = new Map();
-    // 入室のときに台帳で確かめた人（ws → {id, name, code, friends}）。
-    // 以後この接続はこの人として扱う。ブラウザが名乗る値は席のIDに使わない
-    this.verified = new Map();
     this.room = null;
   }
 
@@ -87,7 +92,6 @@ export class DaifugoRoom {
     server.addEventListener("close", () => {
       const pid = this.sessions.get(server);
       this.sessions.delete(server);
-      this.verified.delete(server);
       // ロビー中にタブを閉じた人の席を空ける（タブを閉じても "leave" は届かない）。
       // 対戦中は席を残す（電波が切れただけで抜けたことにしない）。
       // 再読み込みでは新しい接続が先に座ることがあるので、まだ誰も繋がっていないときだけ外す
@@ -97,20 +101,6 @@ export class DaifugoRoom {
       }
     });
     return new Response(null, { status: 101, webSocket: client });
-  }
-
-  // 台帳にカギを見せて「この人で間違いないか」を確かめる。入室のときだけ呼ぶ
-  async verifyUser(id, secret) {
-    if (!id || !secret) return null;
-    try {
-      const res = await this.env.USERS.get(this.env.USERS.idFromName("users"))
-        .fetch("https://users/verify", {
-          method: "POST", headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id, secret }),
-        });
-      const d = await res.json();
-      return d.ok ? { id: d.id, name: d.name, code: d.code, friends: d.friends || [] } : null;
-    } catch { return null; }
   }
 
   async persistAndBroadcast() {
@@ -213,22 +203,22 @@ export class DaifugoRoom {
   // ---------- メッセージ処理 ----------
   async handleMessage(ws, msg) {
     const type = msg.type;
-
-    // 入室のときだけ台帳に問い合わせる。通ったら控えて、以後は問い合わせない
-    if (type === "create" || type === "join" || type === "enter") {
-      if (!this.verified.has(ws)) {
-        const who = await this.verifyUser(msg.userId, msg.secret);
-        if (!who) { ws.send(JSON.stringify({ type: "needLogin" })); return; }
-        this.verified.set(ws, who);
-      }
-    }
-    // 検証されていない接続からは何も受け付けない（席のIDを名乗らせない）
-    const me = this.verified.get(ws);
-    if (!me) { ws.send(JSON.stringify({ type: "needLogin" })); return; }
-    const playerId = me.id;
+    const playerId = msg.playerId;
 
     if (type === "create") {
-      this.room = this.newRoom(msg.code, playerId, me.name);
+      // 合言葉は作る人が決める。すでに誰かが使っていたら上書きしない
+      // （人が抜けて空になった部屋は leave 側で this.room = null に戻るので、
+      // 本当に使われなくなった合言葉は自然に空く）
+      if (this.room) {
+        ws.send(JSON.stringify({ type: "error", message: "その合言葉はもう使われています。別の言葉にするか、参加するを試してください" }));
+        return;
+      }
+      const code = normalizeCode(msg.code);
+      if (!code) {
+        ws.send(JSON.stringify({ type: "error", message: "合言葉は2〜16文字で入力してください" }));
+        return;
+      }
+      this.room = this.newRoom(code, playerId, msg.name);
       this.sessions.set(ws, playerId);
       await this.persistAndBroadcast();
       return;
@@ -238,7 +228,7 @@ export class DaifugoRoom {
 
     // 部屋が無ければその場で作る経路。通るのは開発部屋（?dev=1 の決め打ちの部屋）だけ
     if (type === "enter" && !this.room) {
-      this.room = this.newRoom(msg.code, playerId, me.name);
+      this.room = this.newRoom(msg.code, playerId, msg.name);
       this.sessions.set(ws, playerId);
       await this.persistAndBroadcast();
       return;
@@ -249,10 +239,9 @@ export class DaifugoRoom {
 
     if (type === "join" || type === "enter") {
       this.sessions.set(ws, playerId);
-      const myName = me.name;
+      const myName = msg.name;
       // 席のある人が誰も繋がっていない対戦中の部屋は、捨ててロビーに戻す。
-      // これが無いと、全員が入れ替わった部屋（端末を変えた・登録し直した）に
-      // 誰も入れず、中断も解散もできないまま残り続ける
+      // これが無いと、全員抜けた部屋に誰も入れず、中断も解散もできないまま残り続ける
       const connected = [...this.sessions.values()];
       const anyoneHome = r.players.some((p) => !p.isCPU && !p.isDummy && connected.includes(p.id));
       if (r.status !== "waiting" && !anyoneHome) {
@@ -1111,214 +1100,21 @@ export class DaifugoRoom {
   }
 }
 
-// ============ ユーザー台帳（UserRegistry） ============
-// 遊ぶ人ひとりに「ユーザーコード」と「秘密のカギ」を発行して覚えておく Durable Object。
-// インスタンスは1つだけ（idFromName("users")）。別のデータベースは使わない。
-//
-//   コードは公開・カギは秘密。
-//   コードを見られてもなりすまされない。カギを見られたらなりすまされる。
-//
-// カギは台帳にも平文で置かない（SHA-256 のハッシュだけ持つ）。返すのは登録した1回きり。
-
-const FAIL_LIMIT = 5;                  // ここまで外したら待たせる
-const FAIL_BASE_MS = 60 * 1000;        // 待ち時間の基準（以降は倍々。上限あり）
-const FAIL_MAX_STEP = 6;
-const FAIL_RESET_MS = 60 * 60 * 1000;  // これだけ間が空いたら数え直す
-// 同じ回線からの登録の上限。携帯回線は多人数が同じIPに見える（CGNAT）ので緩くする。
-// 締め出す損のほうが、水増し登録される損より大きい
-const REG_LIMIT = 100;
-const NAME_MAX = 12;
-
-const jsonRes = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json" } });
-
-// 一致するまでの時間で中身を推測されないよう、必ず最後まで比較する
-function safeEqual(a, b) {
-  const enc = new TextEncoder();
-  const x = enc.encode(String(a == null ? "" : a));
-  const y = enc.encode(String(b == null ? "" : b));
-  let diff = x.length ^ y.length;
-  const n = Math.max(x.length, y.length);
-  for (let i = 0; i < n; i++) diff |= (x[i] || 0) ^ (y[i] || 0);
-  return diff === 0;
-}
-
-// 紛らわしい文字（l/I/1・o/O/0）を除いた32種。256 が 32 で割り切れるので偏りは出ない
-const ID_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789";
-function randomId(len) {
-  const buf = crypto.getRandomValues(new Uint8Array(len));
-  return Array.from(buf, (b) => ID_ALPHABET[b % 32]).join("");
-}
-
-// 人に見せて、口で伝えて、打ってもらうコード。見間違えやすい 0/O・1/I/L は使わない。
-// 8文字。部屋コード（4文字）とは長さが違うので、取り違えても相手の部屋には行かない
-const CODE_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
-function makeUserCode() {
-  const buf = crypto.getRandomValues(new Uint8Array(8));
-  return Array.from(buf, (b) => CODE_CHARS[b % CODE_CHARS.length]).join("");
-}
-
-async function sha256hex(s) {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(s)));
-  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-// 改行やタブを混ぜて画面を崩されないよう、見える文字だけ残して詰める
-function cleanName(v) {
-  return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, NAME_MAX);
-}
-const newStats = () => ({ games: 0, wins: 0, byClass: {}, fouls: 0 });
-
-export class UserRegistry {
-  constructor(state, env) {
-    this.state = state;
-    this.env = env;
-  }
-
-  // ---- 保存の出し入れ。索引を2本持つ（コード引き・カギ引き） ----
-  byId(id) { return this.state.storage.get("u:" + id); }
-  put(u) { return this.state.storage.put("u:" + u.id, u); }
-  async idByCode(code) { return (await this.state.storage.get("c:" + code)) || null; }
-  async userBySecret(secret) {
-    const s = String(secret || "");
-    if (s.length < 8) return null;
-    const id = await this.state.storage.get("s:" + (await sha256hex(s)));
-    return id ? (await this.byId(id)) || null : null;
-  }
-  // 外に出してよい形。カギとカギのハッシュは絶対に混ぜない
-  pub(u) {
-    return { id: u.id, code: u.code, name: u.name, stats: u.stats || newStats(), friends: u.friends || [] };
-  }
-
-  // ---- 総当たり対策：同じ相手が続けて外したら待たせる ----
-  async waitSec(key) {
-    const fails = (await this.state.storage.get("fails")) || {};
-    const f = fails[key];
-    if (!f || !f.until || f.until < Date.now()) return 0;
-    return Math.ceil((f.until - Date.now()) / 1000);
-  }
-  async addFail(key, limit = FAIL_LIMIT) {
-    const fails = (await this.state.storage.get("fails")) || {};
-    const now = Date.now();
-    // 掃除の基準は「最後に外した時刻(at)」。待ち時間(until)で見ると、
-    // まだ待たせる前（until=0）の記録まで消えてしまい、回数がいつまでも溜まらない
-    for (const k of Object.keys(fails)) if ((fails[k].at || 0) < now - 86400000) delete fails[k];
-    const prev = fails[key];
-    const f = prev && now - (prev.at || 0) < FAIL_RESET_MS ? prev : { n: 0, until: 0 };
-    f.n += 1;
-    f.at = now;
-    if (f.n >= limit) f.until = now + FAIL_BASE_MS * 2 ** Math.min(f.n - limit, FAIL_MAX_STEP);
-    fails[key] = f;
-    await this.state.storage.put("fails", fails);
-  }
-  async clearFail(key) {
-    const fails = (await this.state.storage.get("fails")) || {};
-    if (fails[key]) { delete fails[key]; await this.state.storage.put("fails", fails); }
-  }
-  async tooSoon(key) {
-    const wait = await this.waitSec(key);
-    return wait > 0 ? `続けて失敗しています。${wait}秒ほど待ってからお試しください` : null;
-  }
-
-  async fetch(request) {
-    const url = new URL(request.url);
-    const ip = request.headers.get("CF-Connecting-IP") || "local";
-    let body = {};
-    try { body = await request.json(); } catch { body = {}; }
-
-    switch (url.pathname) {
-      case "/api/user/register": return this.register(body, ip);
-      case "/api/user/login": return this.login(body, ip);
-      case "/api/user/rename": return this.rename(body, ip);
-      // ここから下は部屋のDOからしか呼ばれない。Worker のルーターが外から通さない
-      case "/verify": return this.verify(body);
-      default: return new Response("Not found", { status: 404 });
-    }
-  }
-
-  // 新しい人を登録する。カギを返すのはこの1回だけ
-  async register(body, ip) {
-    const busy = await this.tooSoon("reg:" + ip);
-    if (busy) return jsonRes({ ok: false, error: busy });
-    const name = cleanName(body.name);
-    if (!name) return jsonRes({ ok: false, error: "名前を入力してください" });
-
-    let code;
-    do { code = makeUserCode(); } while (await this.idByCode(code));
-    const secret = randomId(32);
-    const hash = await sha256hex(secret);
-    const u = {
-      id: randomId(12), code, name, secretHash: hash,
-      createdAt: Date.now(), lastSeenAt: Date.now(), friends: [], stats: newStats(),
-    };
-    await this.put(u);
-    await this.state.storage.put("c:" + code, u.id);
-    await this.state.storage.put("s:" + hash, u.id);
-    // 登録そのものにも回数を積む（1回線から無限に増やされないように）
-    await this.addFail("reg:" + ip, REG_LIMIT);
-    return jsonRes({ ok: true, ...this.pub(u), secret });
-  }
-
-  // カギでログインする。引き継ぎもここを通る（新しい端末でカギを入れるだけ）
-  async login(body, ip) {
-    const busy = await this.tooSoon("login:" + ip);
-    if (busy) return jsonRes({ ok: false, error: busy });
-    const u = await this.userBySecret(body.secret);
-    if (!u) {
-      await this.addFail("login:" + ip);
-      return jsonRes({ ok: false, error: "この引き継ぎコードは使えません" });
-    }
-    await this.clearFail("login:" + ip);
-    u.lastSeenAt = Date.now();
-    await this.put(u);
-    return jsonRes({ ok: true, ...this.pub(u) });
-  }
-
-  async rename(body, ip) {
-    const busy = await this.tooSoon("login:" + ip);
-    if (busy) return jsonRes({ ok: false, error: busy });
-    const u = await this.userBySecret(body.secret);
-    if (!u) {
-      await this.addFail("login:" + ip);
-      return jsonRes({ ok: false, error: "登録が確認できませんでした" });
-    }
-    const name = cleanName(body.name);
-    if (!name) return jsonRes({ ok: false, error: "名前を入力してください" });
-    u.name = name;
-    await this.put(u);
-    return jsonRes({ ok: true, ...this.pub(u) });
-  }
-
-  // 部屋のDOが入室のときだけ呼ぶ。毎手番で呼ばないこと（ここに全部集まるため）
-  async verify(body) {
-    const u = await this.byId(String(body.id || ""));
-    if (!u) return jsonRes({ ok: false });
-    const hash = await sha256hex(String(body.secret || ""));
-    if (!safeEqual(hash, u.secretHash)) return jsonRes({ ok: false });
-    u.lastSeenAt = Date.now();
-    await this.put(u);
-    return jsonRes({ ok: true, id: u.id, name: u.name, code: u.code, friends: u.friends || [] });
-  }
-}
-
-// 台帳は1インスタンスだけ使う
-const users = (env) => env.USERS.get(env.USERS.idFromName("users"));
-const USER_ROUTES = ["/api/user/register", "/api/user/login", "/api/user/rename"];
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // 一般の部屋（4文字コード）
-    const m = url.pathname.match(/^\/api\/room\/([A-Za-z0-9]{4})\/ws$/);
+    // 一般の部屋。合言葉（2〜16文字。日本語も通す）がそのままDOの識別子になる。
+    // 日本語はURLに乗ると percent-encoding で長さが膨らむので、正規表現では
+    // 長さを見ず「スラッシュを含まない1区間」とだけ捉え、長さは decode した後に見る
+    const m = url.pathname.match(/^\/api\/room\/([^/]+)\/ws$/);
     if (m) {
-      const id = env.ROOM.idFromName(m[1].toUpperCase());
+      let decoded;
+      try { decoded = decodeURIComponent(m[1]); } catch { decoded = ""; }
+      const code = normalizeCode(decoded);
+      if (!code) return new Response("Bad room code", { status: 400 });
+      const id = env.ROOM.idFromName(code);
       return env.ROOM.get(id).fetch(request);
-    }
-
-    // ユーザー台帳。通すルートは名指しで並べる（/verify は部屋のDO専用なので外から入れない）
-    if (USER_ROUTES.includes(url.pathname)) {
-      if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
-      return users(env).fetch(request);
     }
 
     // 静的ファイルの配信は GET/HEAD だけ。本文つきの POST を流すと配信側が落ちる

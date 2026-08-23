@@ -1,5 +1,4 @@
 import { RULE_CATEGORIES, buildDefaultRules, PRESETS, presetRules, sameRules } from "./rules.js";
-import { qrSVG } from "./qr.js";
 
 // --- 自作プリセット（この端末に保存される）---
 const CUSTOM_KEY = "daifugo-presets";
@@ -19,6 +18,7 @@ const SUIT_SYMBOL = { S: "♠", H: "♥", D: "♦", C: "♣", JOKER: "★" };
 const SUIT_COLOR = { S: "c-black", H: "c-red", D: "c-red", C: "c-black", JOKER: "c-joker" };
 const PICK_RANKS = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
+const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2));
 const effRev = (r) => !!r.revolution !== !!r.tempReverse;
 // 手札の並びは常に 3→2（Joker は右端）。革命・一時反転で強弱が逆になっても
 // 並べ替えない（同じ札が毎回同じ位置にある方が探しやすいため）
@@ -39,36 +39,22 @@ function badgeColor(label) {
 }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-// 秘密のカギ。これを持っている端末が「その人」。人に見せたらなりすまされる。
-// ユーザーコード（人に見せる方）はサーバーから来るので端末には持たない
-const SECRET_KEY = "daifugo-secret";
-const getSecret = () => localStorage.getItem(SECRET_KEY) || "";
-
 const state = {
-  // me は台帳から来る自分の情報 {id, code, name, stats, friends}。
-  // playerId は席のIDで、必ず me.id と同じ（画面側の参照を短く保つためだけの控え）
-  me: null, playerId: "",
+  playerId: localStorage.getItem("daifugo-pid") || uuid(),
+  name: localStorage.getItem("daifugo-name") || "",
   night: localStorage.getItem("daifugo-night") === "1",
-  screen: "boot", room: null, error: "", selected: [], ws: null,
+  screen: "home", room: null, error: "", selected: [], ws: null,
   showRules: false, openCat: null, draftRules: null,
   testMode: false, showGameRules: false, menu: null, code: "",
-  busy: false, showSecret: false, nameDraft: "",
 };
-// 台帳から返ってきた自分を控える。席のIDもここで揃える
-function setMe(d) {
-  state.me = { id: d.id, code: d.code, name: d.name, stats: d.stats || {}, friends: d.friends || [] };
-  state.playerId = d.id;
-}
-const codeText = (c) => (c ? `${c.slice(0, 4)}-${c.slice(4)}` : "");
+localStorage.setItem("daifugo-pid", state.playerId);
 
 // 開発者モード：URLに ?dev=1 が付いているときだけテスト機能が見える。
 // 端末に記憶はしない（通常URLで開けば必ずOFF）。記憶すると、通常URLを開いた
 // つもりでも開発者メニューが出続けて紛らわしいため。
 const IS_DEV = new URLSearchParams(location.search).get("dev") === "1";
-// 使わなくなった値の後始末（開発者モードの記憶方式・身内ルームの合言葉・自称のIDと名前）
-for (const k of ["daifugo-dev", "daifugo-pass", "daifugo-code", "daifugo-pid", "daifugo-name"]) {
-  localStorage.removeItem(k);
-}
+// 使わなくなった値の後始末（開発者モードの記憶方式・身内ルームの合言葉と部屋コード）
+for (const k of ["daifugo-dev", "daifugo-pass", "daifugo-code"]) localStorage.removeItem(k);
 
 // ダミー席がある部屋は必ずテストモード（誰も自動で着手しないため）
 function effTestMode() {
@@ -91,13 +77,11 @@ function actingId() {
   if (r.order && r.order.length) return r.order[r.currentTurnIndex];
   return state.playerId;
 }
-// 入室のメッセージには必ず身元（内部IDと秘密のカギ）を載せる。
-// サーバーはこれを台帳で確かめてからでないと席を作らない
-const withMe = (o) => ({ ...o, userId: state.me ? state.me.id : "", secret: getSecret() });
 function connect(code, first) {
   // 部屋の状態が来る前でも部屋コードを出せるように控えておく（固まったときの確認用）
   state.code = code;
-  openSocket(`/api/room/${code}/ws`, withMe(first), `部屋 ${code} に接続できませんでした`, "home");
+  // 合言葉は日本語も通すので、経路に乗せるときは必ずエンコードする
+  openSocket(`/api/room/${encodeURIComponent(code)}/ws`, first, `部屋 ${code} に接続できませんでした`, "home");
 }
 function openSocket(path, first, failMsg, backTo) {
   // 先に参照を外してから閉じる。そうしないと下の onclose が「切断」と誤判定する
@@ -128,12 +112,6 @@ function openSocket(path, first, failMsg, backTo) {
       if (d.room.status === "playing" || d.room.status === "exchange") state.screen = "game";
       else if (d.room.status === "finished") state.screen = "finished";
       else state.screen = "lobby";
-    } else if (d.type === "needLogin") {
-      // 席を作ってもらえなかった。ここでカギを捨てない（手元の情報が古いだけのことがある）。
-      // ログインし直して、それでも通らなければ boot() が登録画面へ送る
-      resetToTitle("入り直しています…");
-      boot();
-      return;
     } else if (d.type === "disbanded") { resetToTitle("部屋が解散されました"); return; }
     else if (d.type === "error") state.error = d.message;
     render();
@@ -154,98 +132,32 @@ function resetToTitle(message) {
 
 // ---------- 操作 ----------
 const W = window;
-// 名前は台帳のものを使うので、ここでは聞かない
 W.createRoom = () => {
-  const code = Array.from({ length: 4 }, () => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(Math.random() * 32)]).join("");
-  connect(code, { type: "create", code });
+  state.name = document.getElementById("name-input").value.trim();
+  const code = (document.getElementById("new-code-input").value || "").trim().toUpperCase();
+  if (!state.name) { state.error = "名前を入力してください"; return render(); }
+  if (code.length < 2 || code.length > 16) { state.error = "合言葉は2〜16文字で入力してください"; return render(); }
+  localStorage.setItem("daifugo-name", state.name);
+  connect(code, { type: "create", playerId: state.playerId, name: state.name, code });
 };
 W.joinRoom = () => {
+  state.name = document.getElementById("name-input").value.trim();
   const code = document.getElementById("code-input").value.trim().toUpperCase();
+  if (!state.name) { state.error = "名前を入力してください"; return render(); }
   if (!code) { state.error = "部屋コードを入力してください"; return render(); }
-  connect(code, { type: "join" });
+  localStorage.setItem("daifugo-name", state.name);
+  connect(code, { type: "join", playerId: state.playerId, name: state.name });
 };
 W.resetToTitleBtn = () => resetToTitle();
 
-// ---------- 身元（登録・ログイン・マイページ） ----------
-// netError は「サーバーに届かなかった」印。カギが悪いのか回線が悪いのかを取り違えると、
-// つながらないだけの人からカギを取り上げてしまう
-const post = (path, body) =>
-  fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
-    .then((r) => r.json())
-    .catch(() => ({ ok: false, netError: true, error: "つながりませんでした。通信を確認してください" }));
-
-// 起動時。カギを持っていればそのまま入る。持っていなければ登録から
-async function boot() {
-  const secret = getSecret();
-  if (!secret) { state.screen = "register"; return render(); }
-  state.busy = true; render();
-  const d = await post("/api/user/login", { secret });
-  state.busy = false;
-  if (!d.ok) {
-    // 捨てるのは「サーバーがこのカギは使えないと言ったとき」だけ。
-    // つながらなかっただけで捨てると、引き継ぎコードを控えていない人が二度と戻れない
-    if (!d.netError) localStorage.removeItem(SECRET_KEY);
-    state.screen = "register";
-    state.error = d.error || "登録が確認できませんでした";
-    return render();
-  }
-  setMe(d);
-  state.screen = "home"; state.error = "";
-  render();
-}
-
-W.doRegister = async () => {
-  const el = document.getElementById("reg-name");
-  const name = ((el ? el.value : "") || "").trim();
-  if (!name) { state.error = "名前を入力してください"; return render(); }
-  state.busy = true; state.error = ""; render();
-  const d = await post("/api/user/register", { name });
-  state.busy = false;
-  if (!d.ok) { state.error = d.error || "登録できませんでした"; return render(); }
-  localStorage.setItem(SECRET_KEY, d.secret);
-  setMe(d);
-  state.screen = "home";
-  render();
-};
-// 別の端末から引き継ぐ。入れるのは前の端末で見せた「引き継ぎコード」＝秘密のカギ
-W.doTakeover = async () => {
-  const el = document.getElementById("takeover");
-  const secret = ((el ? el.value : "") || "").trim();
-  if (!secret) { state.error = "引き継ぎコードを入力してください"; return render(); }
-  state.busy = true; state.error = ""; render();
-  const d = await post("/api/user/login", { secret });
-  state.busy = false;
-  if (!d.ok) { state.error = d.error || "この引き継ぎコードは使えません"; return render(); }
-  localStorage.setItem(SECRET_KEY, secret);
-  setMe(d);
-  state.screen = "home";
-  render();
-};
-W.openMe = () => { state.menu = null; state.screen = "me"; state.showSecret = false; state.error = ""; render(); };
-W.closeMe = () => { state.screen = "home"; state.showSecret = false; state.error = ""; render(); };
-W.toggleSecret = () => { state.showSecret = !state.showSecret; render(); };
-W.doRename = async () => {
-  const el = document.getElementById("me-name");
-  const name = ((el ? el.value : "") || "").trim();
-  if (!name) { state.error = "名前を入力してください"; return render(); }
-  state.busy = true; state.error = ""; render();
-  const d = await post("/api/user/rename", { secret: getSecret(), name });
-  state.busy = false;
-  if (!d.ok) { state.error = d.error || "変えられませんでした"; return render(); }
-  setMe(d);
-  state.error = "名前を変えました";
-  render();
-};
-W.copyMyCode = () => {
-  if (!state.me) return;
-  navigator.clipboard.writeText(codeText(state.me.code)).then(
-    () => { state.error = "ユーザーコードをコピーしました"; render(); },
-    () => { state.error = "コピーできませんでした。長押しで選択してください"; render(); });
-};
-
 // 開発用：部屋コードのやり取りを省いて、決め打ちの部屋に直行する（?dev=1 のときだけ出る）
 const DEV_CODE = "DEV0";
-W.devEnter = () => connect(DEV_CODE, { type: "enter", code: DEV_CODE });
+W.devEnter = () => {
+  const input = document.getElementById("name-input");
+  state.name = ((input ? input.value : "") || "").trim() || "開発者";
+  localStorage.setItem("daifugo-name", state.name);
+  connect(DEV_CODE, { type: "enter", playerId: state.playerId, name: state.name, code: DEV_CODE });
+};
 W.startGame = () => send({ type: "start", testMode: effTestMode(), asPlayerId: null });
 W.addCPU = () => send({ type: "addCPU", asPlayerId: null });
 W.removeCPU = () => send({ type: "removeCPU", asPlayerId: null });
@@ -438,7 +350,6 @@ function menuOverlay() {
       ${isHost && playing ? `<button onclick="toggleMenu('abort')" class="btn-sub menu-item">対戦を中断してロビーへ</button>` : ""}
       ${isHost ? `<button onclick="toggleMenu('disband')" class="btn-sub menu-item">部屋を解散する</button>` : ""}
       <button onclick="leaveRoom()" class="btn-sub menu-item">タイトルに戻る</button>
-      <button onclick="openMe()" class="btn-sub menu-item">マイページ</button>
     </div>
     <p class="dev-note">「タイトルに戻る」は自分だけが抜けます。同じ端末なら、同じ部屋コードで入り直せば席に戻れます。
     ${isHost ? "" : "「中断」はホストだけが操作できます。"}</p>
@@ -493,95 +404,25 @@ function render() { paint(); layoutHand(); requestAnimationFrame(layoutHand); }
 function paint() {
   const app = document.getElementById("app");
 
-  // 起動直後。カギを確かめている間の待ち画面
-  if (state.screen === "boot") {
-    app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-3">
-      <h1 class="title">大富豪</h1><span class="t-dim">確認中…</span></div>`;
-    return;
-  }
-
-  // 初回。ここで名前を入れると、ユーザーコードと秘密のカギが発行される
-  if (state.screen === "register") {
-    app.innerHTML = `<div class="min-h-screen flex items-center justify-center p-4">
-      <div class="w-full max-w-sm panel rounded-2xl p-6">
-        <div class="flex justify-end mb-2">${nightBtn()}</div>
-        <h1 class="title">大富豪</h1>
-        <p class="t-dim text-center text-sm mb-5">はじめに、名前を決めてください</p>
-        <input id="reg-name" value="${esc(state.me ? state.me.name : "")}" placeholder="あなたの名前" maxlength="12"
-          onkeydown="if(event.key==='Enter')doRegister()" class="inp w-full mb-3 px-3 py-2 rounded-lg" />
-        <button onclick="doRegister()" ${state.busy ? "disabled" : ""}
-          class="btn-play w-full py-3 rounded-lg font-bold mb-2">${state.busy ? "登録中…" : "はじめる"}</button>
-        <p class="t-dim text-xs mb-5">名前はあとから変えられます。この端末があなたの登録を覚えます。</p>
-
-        <div class="divider"><span>前に使っていた端末がある</span></div>
-        <input id="takeover" autocomplete="off" spellcheck="false" placeholder="引き継ぎコード"
-          onkeydown="if(event.key==='Enter')doTakeover()" class="inp code-inp w-full mb-2 px-3 py-2 rounded-lg text-center" />
-        <button onclick="doTakeover()" ${state.busy ? "disabled" : ""}
-          class="btn-sub w-full py-3 rounded-lg font-bold">引き継ぐ</button>
-        <p class="t-dim text-xs mt-2">前の端末の「マイページ」に出ているコードです。</p>
-        ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
-      </div></div>`;
-    return;
-  }
-
-  // マイページ。人に見せるコードと、絶対に見せないカギを、はっきり分けて置く
-  if (state.screen === "me" && state.me) {
-    const me = state.me;
-    app.innerHTML = `<div class="min-h-screen p-4"><div class="max-w-sm mx-auto">
-      <div class="flex justify-between items-center mb-3">
-        <h2 class="t-accent text-lg font-bold">マイページ</h2>
-        <span class="flex gap-2">${nightBtn()}
-          <button onclick="closeMe()" class="btn-sub px-3 py-1 rounded-lg text-sm">閉じる</button></span>
-      </div>
-      ${state.error ? `<p class="err mb-3 text-center text-sm">${esc(state.error)}</p>` : ""}
-
-      <div class="panel rounded-xl p-4 mb-3">
-        <p class="t-dim text-sm mb-1">あなたのユーザーコード</p>
-        <div class="user-code">${esc(codeText(me.code))}</div>
-        <p class="t-dim text-xs mb-2">友達に見せるコードです。見られても、あなたになりすまされることはありません。</p>
-        ${qrSVG(me.code) || ""}
-        <button onclick="copyMyCode()" class="btn-sub w-full py-2 mt-3 rounded-lg text-sm">コードをコピー</button>
-      </div>
-
-      <div class="panel rounded-xl p-4 mb-3">
-        <p class="t-dim text-sm mb-2">名前</p>
-        <div class="mem-line">
-          <input id="me-name" value="${esc(me.name)}" maxlength="12"
-            onkeydown="if(event.key==='Enter')doRename()" class="inp px-2 py-1 rounded text-sm" style="flex:1;min-width:0" />
-          <button onclick="doRename()" ${state.busy ? "disabled" : ""} class="btn-sub">変える</button>
-        </div>
-      </div>
-
-      <div class="panel rounded-xl p-4">
-        <p class="t-dim text-sm mb-1">別の端末に引き継ぐ</p>
-        <p class="warn text-xs mb-2">このコードを見た人は、あなたになれます。人前で開かないでください。</p>
-        ${state.showSecret
-          ? `<div class="secret-box">${esc(getSecret())}</div>
-             ${qrSVG(getSecret()) || ""}
-             <button onclick="toggleSecret()" class="btn-sub w-full py-2 mt-3 rounded-lg text-sm">隠す</button>`
-          : `<button onclick="toggleSecret()" class="btn-sub w-full py-2 rounded-lg text-sm">引き継ぎコードを表示する</button>`}
-      </div>
-    </div></div>`;
-    return;
-  }
-
   if (state.screen === "home") {
     app.innerHTML = `<div class="min-h-screen flex items-center justify-center p-4">
       <div class="w-full max-w-sm panel rounded-2xl p-6">
         <div class="flex justify-end mb-2">${nightBtn()}</div>
         <h1 class="title">大富豪</h1>
-        <p class="t-dim text-center text-sm mb-4">友達とオンライン対戦</p>
-        <button onclick="openMe()" class="me-chip">${esc(state.me ? state.me.name : "")}
-          <span class="me-chip-code">${esc(codeText(state.me ? state.me.code : ""))}</span></button>
+        <p class="t-dim text-center text-sm mb-6">友達とオンライン対戦</p>
+        <label class="block t-dim text-sm mb-1">名前</label>
+        <input id="name-input" value="${esc(state.name)}" placeholder="あなたの名前を入力" class="inp w-full mb-4 px-3 py-2 rounded-lg" />
+        <label class="block t-dim text-sm mb-1">合言葉（自分で決める）</label>
+        <input id="new-code-input" placeholder="例：やまだけ2026" maxlength="16" class="inp w-full mb-3 px-3 py-2 rounded-lg tracking-widest text-center uppercase" />
         <button onclick="createRoom()" class="btn-play w-full py-3 rounded-lg font-bold mb-3">部屋を作る</button>
         <div class="divider"><span>または</span></div>
-        <input id="code-input" placeholder="部屋コード" maxlength="4" class="inp w-full mb-3 px-3 py-2 rounded-lg tracking-widest text-center uppercase" />
+        <input id="code-input" placeholder="部屋コード" maxlength="16" class="inp w-full mb-3 px-3 py-2 rounded-lg tracking-widest text-center uppercase" />
         <button onclick="joinRoom()" class="btn-sub w-full py-3 rounded-lg font-bold">部屋に参加する</button>
         ${IS_DEV ? `<div class="devbox mt-4">
           <p class="dev-t">開発者メニュー</p>
           <button onclick="devEnter()" class="btn-sub w-full py-2 rounded-lg font-bold text-sm">開発部屋に入る</button>
           <p class="dev-note">部屋コードなしで固定の部屋「${DEV_CODE}」に直行します。
-          無ければその場で作られ、すでにあれば参加します。</p>
+          無ければその場で作られ、すでにあれば参加します。名前が空なら「開発者」になります。</p>
         </div>` : ""}
         ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
       </div></div>`;
@@ -790,4 +631,3 @@ function paint() {
 
 document.body.classList.toggle("night", state.night);
 render();
-boot();
