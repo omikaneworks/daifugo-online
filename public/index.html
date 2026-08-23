@@ -163,46 +163,8 @@ button:disabled{opacity:.3}
 .menu-item{width:100%;padding:13px;border-radius:10px;font-weight:700;text-align:center}
 /* Qボンバーのように「選ぶだけ」のものは画面中央のダイアログにする */
 .overlay-center{align-items:center}
-/* 招待リンクのQR。ナイトモードでも読めるよう、白地は qr.js 側で固定にしている */
-.qr-svg{display:block;width:100%;max-width:250px;margin:0 auto;border-radius:6px}
-.qr-code{text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-  letter-spacing:.15em;font-weight:700;color:var(--text);margin-top:8px}
 .overlay-center .overlay-body{border-radius:16px;width:calc(100% - 32px);max-width:360px;
   border-color:var(--accent);border-width:2px;padding:14px}
-
-/* 身内ルーム（合言葉モード）。トップ画面の隅の入口は、
-   一般の人の邪魔にならないよう薄く小さく置く（押せば合言葉の入力欄が出るだけ） */
-.corner-mark{position:fixed;right:10px;bottom:10px;width:34px;height:34px;border:none;background:none;
-  color:var(--dim);opacity:.28;font-size:1.1rem;line-height:1;cursor:pointer}
-.corner-mark:hover{opacity:.6}
-.gate-remember{display:flex;align-items:flex-start;gap:8px;font-size:.85rem;color:var(--dim);line-height:1.4;cursor:pointer}
-.gate-admin{display:block;margin:14px auto 0;background:none;border:none;color:var(--dim);
-  opacity:.5;font-size:.78rem;text-decoration:underline;cursor:pointer}
-/* 友達が入るときに打ち込む部屋コード。読み違えないよう字間を空ける */
-.code-inp{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.18em;font-weight:700}
-.open-badge{background:#22c55e;color:#06280f;border-radius:999px;padding:1px 7px;font-size:.7rem;font-weight:700}
-/* ロビーで知らない人を席から外す（ホストのみ・身内ルームのみ） */
-.kick-btn{padding:2px 8px;border-radius:6px;font-size:.7rem;margin-left:auto}
-/* 部屋コードを持たない身内ルームは、代わりに部屋名を大きく出す */
-.roomname{font-size:1.5rem;font-weight:700;text-align:center;color:var(--text);line-height:1.3}
-/* 管理画面のメンバー一覧。名前・合言葉・操作を縦に積む。
-   横に並べると、狭い画面で合言葉が縮まず画面ごと横スクロールしてしまう */
-.mem-row{display:flex;flex-direction:column;gap:3px;padding:9px 0;border-bottom:1px solid var(--border)}
-.mem-row:last-child{border-bottom:none}
-.mem-off{opacity:.55}
-.mem-name{display:flex;align-items:center;gap:5px;flex-wrap:wrap;font-size:.95rem;color:var(--text)}
-.mem-pass{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.9rem;
-  color:var(--accent);word-break:break-all}
-.mem-line{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
-.mem-tag{color:var(--dim);font-size:.7rem;flex:0 0 auto}
-.mem-code{letter-spacing:.12em}
-.mem-btns{display:flex;gap:4px;flex-wrap:wrap;margin-top:2px}
-/* ボタンが狭い画面でも1行に収まる大きさ（折り返すと1人分が縦に伸びて一覧しづらい） */
-.mem-btns .btn-sub,.mem-line .btn-sub{padding:4px 7px;border-radius:6px;font-size:.72rem;white-space:nowrap}
-/* 入力欄つきの1行（メンバー追加・部屋追加）。min-width:0 が無いと入力欄が縮まずはみ出す */
-.mem-add{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.mem-add .inp{flex:1 1 6em;min-width:0}
-.admin-head{display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center;margin-bottom:12px}
 
 /* Tailwind の文字サイズユーティリティを底上げする。
    cdn.tailwindcss.com は生成したCSSを後から差し込むため、

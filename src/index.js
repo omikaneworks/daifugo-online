@@ -60,8 +60,6 @@ export class DaifugoRoom {
     this.state = state;
     this.env = env;
     this.sessions = new Map();
-    // 身内ルーム用。合言葉を通った接続だけがここに入る（ws → メンバー情報）
-    this.verified = new Map();
     this.room = null;
   }
 
@@ -73,25 +71,10 @@ export class DaifugoRoom {
     if (request.headers.get("Upgrade") !== "websocket") return new Response("Expected websocket", { status: 426 });
     await this.ensureLoaded();
 
-    // このヘッダは Worker が合言葉を照合したときだけ付ける。DO には Worker からしか
-    // 到達できないので、付いていること自体が「合言葉を通った」証明になる。
-    // 中身に日本語（名前・部屋名）が入るので base64 で運ぶ。ヘッダに直接入れると仕様違反になる
-    const raw = request.headers.get("X-Daifugo-Member");
-    let member = null;
-    if (raw) {
-      try { member = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(raw), (c) => c.charCodeAt(0)))); }
-      catch { member = null; }
-    }
-
-    // 身内ルームと一般の部屋を混ぜない。取り違えるとどちらかの守りが外れる
-    if (this.room && this.room.private && !member) return new Response("Forbidden", { status: 403 });
-    if (member && this.room && !this.room.private) return new Response("Forbidden", { status: 403 });
-
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();
     this.sessions.set(server, null);
-    if (member) this.verified.set(server, member);
     server.addEventListener("message", async (evt) => {
       let msg;
       try { msg = JSON.parse(evt.data); } catch { return; }
@@ -100,36 +83,11 @@ export class DaifugoRoom {
     });
     server.addEventListener("close", () => {
       this.sessions.delete(server);
-      this.verified.delete(server);
-      // 鍵を持つ人が抜けたら、その場で一覧から消す（60秒待たせない）
-      this.reportOpen(true);
-      // 残っている人の画面にも「閉じた」ことを伝える
-      if (this.room && this.room.private) this.persistAndBroadcast().catch(() => {});
     });
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // 身内ルームが「いま開いているか」を台帳へ報告する。
-  // 鍵を持つ人（key:true）が1人でも繋がっていれば開。誰もいなければ閉じて一覧から消す。
-  // すでに中にいる人は追い出さない（電波が切れただけで対戦が壊れるほうが困るため）
-  reportOpen(force) {
-    const r = this.room;
-    if (!r || !r.private || !r.roomId) return;
-    const now = Date.now();
-    const open = [...this.verified.values()].some((m) => m && m.key);
-    // 開いている間は鮮度を更新し続ける必要があるが、毎回叩くと無駄なので間引く
-    if (!force && open && now - (this.lastReport || 0) < OPEN_PING_MS) return;
-    this.lastReport = now;
-    const body = { roomId: r.roomId, name: r.name, open, count: r.players.length };
-    this.env.PRIVATE.get(this.env.PRIVATE.idFromName("registry"))
-      .fetch("https://registry/setOpen", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-      })
-      .catch(() => { this.lastReport = 0; }); // 失敗したら次の機会に出し直す
-  }
-
   async persistAndBroadcast() {
-    this.reportOpen(false);
     await this.state.storage.put("room", this.room);
     for (const [ws, pid] of this.sessions.entries()) {
       try { ws.send(JSON.stringify({ type: "state", room: this.sanitize(pid) })); }
@@ -153,11 +111,6 @@ export class DaifugoRoom {
     const acting = this.room.testMode ? this.actingId() : null;
     return {
       ...this.room,
-      // 身内ルームでは席のIDをサーバーが決める（端末が名乗るIDは使わない）ので、
-      // 「あなたはこれ」を必ず添えて返す。これが無いと自分の手札もホスト権限も見つけられない
-      you: forPlayerId,
-      // 鍵を持つ人がいま繋がっているか。いなければ新しい友達は入ってこられない
-      keyPresent: [...this.verified.values()].some((m) => m && m.key),
       players: this.room.players.map((p) =>
         p.id === forPlayerId || (acting && p.id === acting) ? p : { ...p, hand: undefined }),
     };
@@ -195,15 +148,10 @@ export class DaifugoRoom {
 
   // ---------- メッセージ処理 ----------
   async handleMessage(ws, msg) {
-    // 身内ルームでは、ブラウザが自称する playerId を信用せず検証済みのIDを使う。
-    // 端末の localStorage を消しても同じ席に戻れる副次効果もある。
-    const v = this.verified.get(ws) || null;
     const type = msg.type;
-    const playerId = v ? v.id : msg.playerId;
+    const playerId = msg.playerId;
 
     if (type === "create") {
-      // 身内ルームは合言葉経由でしか生まれない。この経路で上書きさせない
-      if (v) { ws.send(JSON.stringify({ type: "error", message: "この部屋では使えません" })); return; }
       this.room = this.newRoom(msg.code, playerId, msg.name);
       this.sessions.set(ws, playerId);
       await this.persistAndBroadcast();
@@ -212,15 +160,9 @@ export class DaifugoRoom {
 
     await this.ensureLoaded();
 
-    // 部屋が無ければその場で作る経路。通るのは次の2つだけ：
-    //  ・身内ルーム（合言葉を通った接続。部屋名は登録側が決めるので msg は使わない）
-    //  ・開発部屋（?dev=1 の決め打ちの部屋）
+    // 部屋が無ければその場で作る経路。通るのは開発部屋（?dev=1 の決め打ちの部屋）だけ
     if (type === "enter" && !this.room) {
-      // 部屋を作れるのは鍵を持つ人だけ。友達（key:false）は開いている部屋にしか入れない。
-      // 台帳が「開いている」と言っていても部屋の中身が消えている場合にここへ来る
-      if (v && !v.key) { ws.send(JSON.stringify({ type: "error", message: "この部屋は閉じています" })); return; }
-      this.room = v ? this.newRoom("", playerId, v.name) : this.newRoom(msg.code, playerId, msg.name);
-      if (v) { this.room.private = true; this.room.name = v.roomName; this.room.roomId = v.roomId; }
+      this.room = this.newRoom(msg.code, playerId, msg.name);
       this.sessions.set(ws, playerId);
       await this.persistAndBroadcast();
       return;
@@ -229,13 +171,9 @@ export class DaifugoRoom {
     if (!this.room) { ws.send(JSON.stringify({ type: "error", message: "部屋が見つかりません" })); return; }
     const r = this.room;
 
-    // 身内ルームは合言葉からしか到達できない。部屋コードを知られても入れないようにする。
-    // 逆に一般の部屋へ検証済み接続は来ない（fetch でも弾いているが、ここでも守る）
-    if (!!r.private !== !!v) { ws.send(JSON.stringify({ type: "error", message: "部屋が見つかりません" })); return; }
-
     if (type === "join" || type === "enter") {
       this.sessions.set(ws, playerId);
-      const myName = v ? v.name : msg.name;
+      const myName = msg.name;
       if (!r.players.some((p) => p.id === playerId)) {
         if (r.status !== "waiting") { ws.send(JSON.stringify({ type: "error", message: "すでにゲームが始まっています" })); return; }
         if (r.players.length >= 6) { ws.send(JSON.stringify({ type: "error", message: "満員です（最大6人）" })); return; }
@@ -247,31 +185,6 @@ export class DaifugoRoom {
       if (![...this.sessions.values()].includes(r.hostId)) {
         r.hostId = playerId;
         r.log.push(`${myName} がホストになりました`);
-      }
-      // 身内ルームは部屋の持ち主（鍵を持つ人）のもの。ロビー中に来たらホストを返す
-      if (v && v.key && r.status === "waiting" && r.hostId !== playerId) {
-        r.hostId = playerId;
-        r.log.push(`${myName} がホストになりました`);
-      }
-      // 鍵を持つ人が入った＝部屋が開いた。すぐ一覧に出す
-      if (v && v.key) this.reportOpen(true);
-      await this.persistAndBroadcast();
-      return;
-    }
-
-    // 入ってきた人を席から外す（ホストのみ・ロビー中のみ）。
-    // ♠ を見つけた知らない人が入ってくることがあるので、追い出す手段を用意しておく
-    if (type === "kick") {
-      if (r.hostId !== playerId) { ws.send(JSON.stringify({ type: "error", message: "ホストだけが操作できます" })); return; }
-      if (r.status !== "waiting") { ws.send(JSON.stringify({ type: "error", message: "ゲーム中は外せません" })); return; }
-      const target = r.players.find((p) => p.id === msg.targetId);
-      if (!target) return;
-      // 部屋の持ち主（鍵のIDと同じ席）は外せない。外すと誰も部屋を開けられなくなる
-      if (target.id === r.roomId) { ws.send(JSON.stringify({ type: "error", message: "部屋の持ち主は外せません" })); return; }
-      r.players = r.players.filter((p) => p.id !== msg.targetId);
-      r.log.push(`${target.name} を席から外しました`);
-      for (const [sock, pid] of this.sessions.entries()) {
-        if (pid === msg.targetId) { try { sock.send(JSON.stringify({ type: "kicked" })); sock.close(); } catch {} }
       }
       await this.persistAndBroadcast();
       return;
@@ -300,8 +213,6 @@ export class DaifugoRoom {
     // 部屋ごと消す（ホストのみ）。全員がスタート画面に戻る
     if (type === "disband") {
       if (r.hostId !== playerId) { ws.send(JSON.stringify({ type: "error", message: "ホストだけが操作できます" })); return; }
-      // 身内ルームは常設。消すのは管理画面からだけにする（間違って消すと合言葉ごと作り直し）
-      if (r.private) { ws.send(JSON.stringify({ type: "error", message: "この部屋は解散できません（中断ならロビーに戻せます）" })); return; }
       for (const [sock] of this.sessions.entries()) {
         try { sock.send(JSON.stringify({ type: "disbanded" })); } catch {}
       }
@@ -321,15 +232,12 @@ export class DaifugoRoom {
       if (i >= 0) r.log.push(`${r.players.splice(i, 1)[0].name} が退出しました`);
       this.sessions.delete(ws);
 
-      // 人が一人もいなくなった部屋は残す意味がないので消す（CPU・ダミーだけの部屋も同様）。
-      // ただし身内ルームは常設なので消さない。ここが「翌日また同じ部屋に集まれる」の要
+      // 人が一人もいなくなった部屋は残す意味がないので消す（CPU・ダミーだけの部屋も同様）
       const humans = r.players.filter((p) => !p.isCPU && !p.isDummy);
       if (humans.length === 0) {
-        if (!r.private) {
-          this.room = null;
-          await this.state.storage.deleteAll();
-          return;
-        }
+        this.room = null;
+        await this.state.storage.deleteAll();
+        return;
       } else if (r.hostId === playerId) {
         // ホストが抜けたら残っている人に引き継ぐ
         r.hostId = humans[0].id;
@@ -1142,289 +1050,6 @@ export class DaifugoRoom {
   }
 }
 
-// ============ 身内ルーム（合言葉モード） ============
-// 合言葉と部屋の対応表を持つ Durable Object。インスタンスは1つだけ（idFromName("registry")）。
-// 合言葉はここから外へ出さない。ブラウザに返すのは「通行証・部屋名・自分の名前」だけで、
-// 部屋コードは渡さない（渡すと通常の「部屋コードで参加」から入れてしまい、合言葉が無意味になる）。
-
-const TICKET_TTL_MS = 60 * 1000;   // 通行証の有効期間
-const FAIL_LIMIT = 5;              // ここまで間違えたら待たせる
-const FAIL_BASE_MS = 60 * 1000;    // 待ち時間の基準（以降は倍々。上限あり）
-const FAIL_MAX_STEP = 6;
-const FAIL_RESET_MS = 60 * 60 * 1000; // これだけ間が空いたら回数を数え直す
-// 部屋が「開いている」とみなす鮮度。部屋のDOはこれより短い間隔で報告を更新する
-const OPEN_TTL_MS = 60 * 1000;
-const OPEN_PING_MS = 20 * 1000;
-
-const jsonRes = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json" } });
-
-// 一致するまでの時間で中身を推測されないよう、必ず最後まで比較する
-function safeEqual(a, b) {
-  const enc = new TextEncoder();
-  const x = enc.encode(String(a == null ? "" : a));
-  const y = enc.encode(String(b == null ? "" : b));
-  let diff = x.length ^ y.length;
-  const n = Math.max(x.length, y.length);
-  for (let i = 0; i < n; i++) diff |= (x[i] || 0) ^ (y[i] || 0);
-  return diff === 0;
-}
-
-// 紛らわしい文字（l/I/1・o/O/0）を除いた32種。256 が 32 で割り切れるので偏りは出ない
-const ID_ALPHABET = "abcdefghijkmnpqrstuvwxyz23456789";
-function randomId(len) {
-  const buf = crypto.getRandomValues(new Uint8Array(len));
-  return Array.from(buf, (b) => ID_ALPHABET[b % 32]).join("");
-}
-function randomInt(max) {
-  return crypto.getRandomValues(new Uint32Array(1))[0] % max;
-}
-
-// 口で伝えられて、聞き間違えにくい合言葉を作る
-const PASS_WORDS = [
-  "sakura", "momiji", "kaede", "tsubaki", "hotaru", "kasumi", "shinju", "kogane",
-  "suzuran", "yamabuki", "asagiri", "yuuhi", "hatsuyuki", "mikazuki", "amanogawa", "komorebi",
-  "shiokaze", "harukaze", "natsugumo", "akatsuki", "yozora", "tsukikage", "hanabi", "wakaba",
-  "kaminari", "midori", "kohaku", "ruriiro", "ayame", "nadeshiko", "himawari", "rindou",
-];
-// 友達に教える部屋コード。一般の部屋コード（4文字）と絶対に混ざらないよう6文字にし、
-// 見間違えやすい文字（0/O・1/I/L）は使わない
-const CODE_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
-function makeCode() {
-  let c = "";
-  for (let i = 0; i < 6; i++) c += CODE_CHARS[randomInt(CODE_CHARS.length)];
-  return c;
-}
-function makePass() {
-  const w = () => PASS_WORDS[randomInt(PASS_WORDS.length)];
-  return `${w()}-${w()}-${1000 + randomInt(9000)}`;
-}
-
-export class PrivateRegistry {
-  constructor(state, env) {
-    this.state = state;
-    this.env = env;
-    this.keys = null;
-  }
-
-  // 鍵は1本＝1部屋。部屋を別に作る概念は無い（管理を1枚のリストで済ませるため）
-  async load() {
-    if (!this.keys) this.keys = (await this.state.storage.get("keys")) || [];
-    // 部屋コードは後から足した項目。まだ持っていない鍵にはここで配る
-    const used = new Set(this.keys.map((k) => k.code).filter(Boolean));
-    let added = false;
-    for (const k of this.keys) {
-      if (k.code) continue;
-      let c; do { c = makeCode(); } while (used.has(c));
-      used.add(c); k.code = c; added = true;
-    }
-    if (added) await this.save();
-    return this.keys;
-  }
-  async save() { await this.state.storage.put("keys", this.keys); }
-  // 部屋の呼び名は登録名から自動で決める。ヨコさんが部屋名を考える手間をなくす
-  roomNameOf(name) { return `${name}の部屋`; }
-
-  // ---- 総当たり対策：同じ相手が続けて外したら待たせる ----
-  async waitSec(key) {
-    const fails = (await this.state.storage.get("fails")) || {};
-    const f = fails[key];
-    if (!f || !f.until || f.until < Date.now()) return 0;
-    return Math.ceil((f.until - Date.now()) / 1000);
-  }
-  async addFail(key) {
-    const fails = (await this.state.storage.get("fails")) || {};
-    const now = Date.now();
-    // 掃除の基準は「最後に外した時刻」。待ち時間(until)で見ると、
-    // まだ待たせる前（until=0）の記録まで消えてしまい、回数がいつまでも溜まらない
-    for (const k of Object.keys(fails)) if ((fails[k].at || 0) < now - 86400000) delete fails[k];
-    // しばらく間が空いていれば数え直す（ふだん使いの人が積み重ねで締め出されないように）
-    const prev = fails[key];
-    const f = prev && now - (prev.at || 0) < FAIL_RESET_MS ? prev : { n: 0, until: 0 };
-    f.n += 1;
-    f.at = now;
-    if (f.n >= FAIL_LIMIT) f.until = now + FAIL_BASE_MS * 2 ** Math.min(f.n - FAIL_LIMIT, FAIL_MAX_STEP);
-    fails[key] = f;
-    await this.state.storage.put("fails", fails);
-  }
-  async clearFail(key) {
-    const fails = (await this.state.storage.get("fails")) || {};
-    if (fails[key]) { delete fails[key]; await this.state.storage.put("fails", fails); }
-  }
-
-  // ---- 通行証：60秒・1回きり ----
-  async issueTicket(roomId, member) {
-    const tickets = (await this.state.storage.get("tickets")) || {};
-    const now = Date.now();
-    for (const k of Object.keys(tickets)) if (tickets[k].exp < now) delete tickets[k];
-    const ticket = randomId(32);
-    tickets[ticket] = { roomId, member, exp: now + TICKET_TTL_MS };
-    await this.state.storage.put("tickets", tickets);
-    return ticket;
-  }
-
-  async fetch(request) {
-    const url = new URL(request.url);
-    const ip = request.headers.get("CF-Connecting-IP") || "local";
-    let body = {};
-    try { body = await request.json(); } catch { body = {}; }
-
-    if (url.pathname === "/api/gate") return this.gate(body, ip);
-    if (url.pathname === "/api/join") return this.join(body, ip);
-    if (url.pathname === "/api/admin") return this.admin(body, ip);
-    if (url.pathname === "/claim") return this.claim(body);     // Worker からだけ呼ばれる
-    if (url.pathname === "/setOpen") return this.setOpen(body); // 部屋のDOからだけ呼ばれる
-    return new Response("Not found", { status: 404 });
-  }
-
-  // ---- 開いている部屋の台帳 ----
-  // 「いま鍵を持つ人が繋がっているか」は部屋のDOしか知らないので、DOから報告してもらう。
-  // at の鮮度で見るので、DOが落ちても最大 OPEN_TTL_MS で自然に消える（開きっぱなしにならない）
-  async setOpen(body) {
-    const open = (await this.state.storage.get("open")) || {};
-    const id = String(body.roomId || "");
-    if (!id) return jsonRes({ ok: false });
-    if (body.open) open[id] = { name: String(body.name || ""), count: Number(body.count) || 0, at: Date.now() };
-    else delete open[id];
-    // 古い記録の掃除もここでまとめてやる
-    const now = Date.now();
-    for (const k of Object.keys(open)) if (open[k].at < now - OPEN_TTL_MS) delete open[k];
-    await this.state.storage.put("open", open);
-    return jsonRes({ ok: true });
-  }
-  async freshOpen() {
-    const open = (await this.state.storage.get("open")) || {};
-    const now = Date.now();
-    return Object.entries(open)
-      .filter(([, v]) => v.at > now - OPEN_TTL_MS)
-      .map(([id, v]) => ({ id, name: v.name, count: v.count }));
-  }
-  // 合言葉 → 自分の部屋を開ける通行証
-  async gate(body, ip) {
-    const wait = await this.waitSec(ip);
-    if (wait > 0) return jsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
-
-    const pass = String(body.pass || "").trim();
-    const keys = await this.load();
-    let hit = null;
-    // 見つかっても打ち切らない（当たりの位置が応答時間で漏れないように）
-    for (const k of keys) if (safeEqual(k.pass, pass)) hit = k;
-
-    if (!hit || hit.disabled) {
-      await this.addFail(ip);
-      return jsonRes({ ok: false, error: hit ? "この合言葉は停止されています" : "合言葉が違います" });
-    }
-    await this.clearFail(ip);
-    hit.lastUsedAt = Date.now();
-    await this.save();
-
-    const roomName = this.roomNameOf(hit.name);
-    // key:true が「部屋を開ける人」の印。部屋側はこれを見てホストにする
-    const member = { id: hit.id, name: hit.name, key: true, roomId: hit.id, roomName };
-    const ticket = await this.issueTicket(hit.id, member);
-    // 部屋の識別子（roomId）は返さない。友達に教えてもらう部屋コードだけ渡す
-    return jsonRes({ ok: true, ticket, roomName, memberName: hit.name, code: hit.code });
-  }
-
-  // 友達の入室。合言葉は要らない。知人に教わった部屋コードで入る。
-  // 部屋コードが合っていても、その部屋がいま開いていることが条件
-  async join(body, ip) {
-    const wait = await this.waitSec(ip);
-    if (wait > 0) return jsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
-
-    const code = String(body.code || "").trim().toUpperCase();
-    const keys = await this.load();
-    let hit = null;
-    // 見つかっても打ち切らない（当たりの位置が応答時間で漏れないように）
-    for (const k of keys) if (safeEqual(k.code, code)) hit = k;
-    if (!hit || hit.disabled) {
-      await this.addFail(ip);
-      return jsonRes({ ok: false, error: "この部屋コードは使えません" });
-    }
-    await this.clearFail(ip);
-
-    const roomId = hit.id;
-    const found = (await this.freshOpen()).find((r) => r.id === roomId);
-    if (!found) return jsonRes({ ok: false, error: `${this.roomNameOf(hit.name)}はまだ開いていません。開くまで待ってください` });
-
-    const name = String(body.name || "").trim().slice(0, 12) || "ゲスト";
-    // 席のIDには必ず g: を付ける。鍵のID（roomId と同じ値）と絶対に一致しないので、
-    // 友達が鍵を持つ人になりすましてホストを乗っ取ることはできない
-    const pid = String(body.playerId || "").replace(/[^A-Za-z0-9-]/g, "").slice(0, 40) || randomId(12);
-    const member = { id: "g:" + pid, name, key: false, roomId, roomName: found.name };
-    const ticket = await this.issueTicket(roomId, member);
-    return jsonRes({ ok: true, ticket, roomName: found.name, memberName: name });
-  }
-
-  // 通行証 → 部屋。使ったら即消す
-  async claim(body) {
-    const ticket = String(body.ticket || "");
-    const tickets = (await this.state.storage.get("tickets")) || {};
-    const t = tickets[ticket];
-    if (t) { delete tickets[ticket]; await this.state.storage.put("tickets", tickets); }
-    if (!t || t.exp < Date.now()) return jsonRes({ ok: false });
-    return jsonRes({ ok: true, roomId: t.roomId, member: t.member });
-  }
-
-  // ---- 管理（マスターキーが要る） ----
-  // ローカル開発だけは管理キーなしで通す。有効になるのは .dev.vars に DAIFUGO_DEV=1 が
-  // あるときだけで、.dev.vars は wrangler dev 専用（デプロイされない）ので本番は素通りしない
-  async admin(body, ip) {
-    const devOpen = this.env.DAIFUGO_DEV === "1";
-    const key = "admin:" + ip;
-    if (!devOpen) {
-      const wait = await this.waitSec(key);
-      if (wait > 0) return jsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
-
-      const master = this.env.DAIFUGO_MASTER_KEY;
-      if (!master) return jsonRes({ ok: false, error: "管理キーが未設定です（wrangler secret put DAIFUGO_MASTER_KEY）" });
-      if (!safeEqual(master, body.key)) {
-        await this.addFail(key);
-        return jsonRes({ ok: false, error: "管理キーが違います" });
-      }
-    }
-    await this.clearFail(key);
-
-    const keys = await this.load();
-    const one = () => keys.find((k) => k.id === body.keyId);
-    // 合言葉は全体で重複させない（重複すると行き先が定まらない）
-    const freshPass = () => {
-      const used = new Set(keys.map((k) => k.pass));
-      let p; do { p = makePass(); } while (used.has(p));
-      return p;
-    };
-    // 部屋コードも全体で重複させない（重複すると行き先が定まらない）
-    const freshCode = () => {
-      const used = new Set(keys.map((k) => k.code).filter(Boolean));
-      let c; do { c = makeCode(); } while (used.has(c));
-      return c;
-    };
-
-    switch (body.action) {
-      case "list": break;
-      case "addKey":
-        // 鍵のIDがそのまま部屋の識別子になる
-        keys.push({
-          id: randomId(12), name: String(body.name || "名無し").slice(0, 12),
-          pass: freshPass(), code: freshCode(), disabled: false, lastUsedAt: null,
-        });
-        break;
-      case "renameKey": { const k = one(); if (k) k.name = String(body.name || k.name).slice(0, 12); break; }
-      case "regenPass": { const k = one(); if (k) k.pass = freshPass(); break; }
-      case "regenCode": { const k = one(); if (k) k.code = freshCode(); break; }
-      case "setDisabled": { const k = one(); if (k) k.disabled = !!body.disabled; break; }
-      case "deleteKey": this.keys = keys.filter((k) => k.id !== body.keyId); break;
-      // 間違え続けて待たされている人を、その場で解除する
-      case "clearLocks": await this.state.storage.put("fails", {}); break;
-      default: return jsonRes({ ok: false, error: "不明な操作です" });
-    }
-    await this.save();
-    // いま開いている部屋も一緒に返す（管理画面で誰が遊んでいるか分かる）
-    return jsonRes({ ok: true, keys: this.keys, open: await this.freshOpen() });
-  }
-}
-
-const registry = (env) => env.PRIVATE.get(env.PRIVATE.idFromName("registry"));
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -1434,31 +1059,6 @@ export default {
     if (m) {
       const id = env.ROOM.idFromName(m[1].toUpperCase());
       return env.ROOM.get(id).fetch(request);
-    }
-
-    // 合言葉の照合と管理。合言葉は body で受け取る（URLに載せると履歴やログに残る）
-    if (["/api/gate", "/api/join", "/api/admin"].includes(url.pathname)) {
-      if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
-      return registry(env).fetch(request);
-    }
-
-    // 身内ルーム：通行証と引き換えに部屋へつなぐ。部屋コードはここから外に出ない
-    const t = url.pathname.match(/^\/api\/private\/([a-z0-9]{32})\/ws$/);
-    if (t) {
-      const res = await registry(env).fetch("https://registry/claim", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ticket: t[1] }),
-      });
-      const got = await res.json();
-      if (!got.ok) return new Response("Forbidden", { status: 403 });
-      // このヘッダを付けられるのは Worker だけ。部屋側はこれを合言葉の証明として扱う。
-      // 名前や部屋名が日本語なので base64 にしてから載せる
-      const headers = new Headers(request.headers);
-      const bytes = new TextEncoder().encode(JSON.stringify(got.member));
-      headers.set("X-Daifugo-Member", btoa(String.fromCharCode(...bytes)));
-      const id = env.ROOM.idFromName("priv:" + got.roomId);
-      return env.ROOM.get(id).fetch(request.url, { headers });
     }
 
     // 静的ファイルの配信は GET/HEAD だけ。本文つきの POST を流すと配信側が落ちる

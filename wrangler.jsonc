@@ -9,14 +9,15 @@
   },
   "durable_objects": {
     "bindings": [
-      { "name": "ROOM", "class_name": "DaifugoRoom" },
-      // 身内ルームの合言葉台帳。インスタンスは1つだけ使う
-      { "name": "PRIVATE", "class_name": "PrivateRegistry" }
+      { "name": "ROOM", "class_name": "DaifugoRoom" }
     ]
   },
+  // v2 で足した身内ルームの台帳は v3 で削除した。
+  // クラスを消すだけではデプロイが通らないので、deleted_classes の行を消さないこと
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["DaifugoRoom"] },
-    { "tag": "v2", "new_sqlite_classes": ["PrivateRegistry"] }
+    { "tag": "v2", "new_sqlite_classes": ["PrivateRegistry"] },
+    { "tag": "v3", "deleted_classes": ["PrivateRegistry"] }
   ],
   "observability": {
     "enabled": true
