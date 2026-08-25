@@ -112,6 +112,18 @@ button:disabled{opacity:.3}
 .field .pile-g.old .card.small .jk-txt{font-size:7px}
 .logline{padding:0 16px;font-size:.82rem;color:var(--dim);height:21px;text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 
+/* この端末が入った部屋の一覧（スタート画面）。作った部屋の片付けと、
+   うっかり抜けたときに戻るための入口を兼ねる */
+.myrooms{margin-top:14px;padding-top:12px;border-top:1px solid var(--border)}
+.myroom{display:flex;align-items:center;gap:6px;margin-bottom:6px}
+.myroom-main{flex:1;min-width:0}
+.myroom-code{display:block;font-weight:700;font-size:.9rem;color:var(--text);
+  letter-spacing:.06em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.myroom-state{display:block;font-size:.68rem;color:var(--dim);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.myroom-btn{flex:none;padding:6px 10px;border-radius:8px;font-size:.75rem;font-weight:700}
+.myroom-del{color:var(--err)}
+
 /* ---- 場の効果を大きく出す（8切り・革命など）----
    ログの小さい1行だけだと見落とすため、画面いっぱいにドンと出す。
    pointer-events:none なので、出ている間も普通に操作できる（手を止めない） */

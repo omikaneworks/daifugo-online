@@ -40,6 +40,47 @@ async function fetchProfileName(id, name) {
   } catch { /* 通信できなければ手元の控えのまま使う */ }
   return "";
 }
+// --- 最近の部屋 ---
+// この端末が入った部屋の合言葉を覚えておく。作った部屋だけでなく**参加した部屋も**覚える
+// （うっかりタイトルに戻ったとき、どの部屋にいたか分からなくなるため）。
+// 合言葉だけを持ち、中身はその都度サーバーに尋ねる
+const ROOMS_KEY = "daifugo-myrooms";
+const ROOMS_MAX = 8;
+function loadMyRooms() {
+  try { return JSON.parse(localStorage.getItem(ROOMS_KEY)) || []; } catch { return []; }
+}
+function rememberRoom(code) {
+  if (!code) return;
+  const list = loadMyRooms().filter((r) => r.code !== code);
+  list.unshift({ code, at: Date.now() });
+  localStorage.setItem(ROOMS_KEY, JSON.stringify(list.slice(0, ROOMS_MAX)));
+}
+function forgetRoom(code) {
+  localStorage.setItem(ROOMS_KEY, JSON.stringify(loadMyRooms().filter((r) => r.code !== code)));
+}
+// 覚えている合言葉の今の様子を尋ねる。もう無い部屋は覚えるのをやめる
+async function refreshMyRooms() {
+  const list = loadMyRooms();
+  if (!list.length) { state.myRooms = []; return; }
+  const out = [];
+  for (const r of list) {
+    try {
+      const res = await fetch(`/api/room/${encodeURIComponent(r.code)}/status`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ playerId: state.playerId }),
+      });
+      const d = await res.json();
+      if (d.ok && d.exists) out.push({ ...d, code: r.code });
+      else forgetRoom(r.code);
+    } catch { out.push({ code: r.code, unknown: true }); }
+  }
+  state.myRooms = out;
+  // 入力中は画面を作り直さない（打っている字が消えるため。名前の取得と同じ約束）
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+  render();
+}
+
 async function issuePersonalId() {
   try {
     const r = await fetch("/api/id/issue", { method: "POST" });
@@ -79,8 +120,10 @@ const state = {
   testMode: false, showGameRules: false, menu: null, code: "",
   // マイページ。null="閉じている"・"show"="IDを見せる面"・"paste"="他の端末に合わせる面"
   idPanel: null, idPasteConfirm: null,
-  // 管理画面（プレイヤー台帳・活動ログ）。プレイヤー向けのどの画面にもリンクしない隠しページ
-  adminKey: "", adminData: null, adminTab: "players", adminBusy: false,
+  // 最近の部屋（この端末が入った部屋）。中身はサーバーに尋ねて入れ直す
+  myRooms: [], roomBusy: "", closeConfirm: null,
+  // 管理画面（プレイヤー台帳・活動ログ・部屋）。プレイヤー向けのどの画面にもリンクしない隠しページ
+  adminKey: "", adminData: null, adminTab: "players", adminBusy: false, adminRooms: null,
 };
 
 // 開発者モード：URLに ?dev=1 が付いているときだけテスト機能が見える。
@@ -156,6 +199,8 @@ function openSocket(path, first, failMsg, backTo) {
       const firstState = !state.room;
       state.room = d.room;
       showFlash(d.room.flash, firstState);
+      // 入った部屋は覚えておく（作った部屋も参加した部屋も）。うっかり抜けても戻れるように
+      rememberRoom(d.room.code);
       state.error = "";
       if (!state.draftRules) state.draftRules = JSON.parse(JSON.stringify(d.room.rules));
       if (prevActor !== actingId()) state.selected = [];
@@ -217,9 +262,11 @@ function resetToTitle(message) {
     ws: null, room: null, code: "", draftRules: null, selected: [], menu: null,
     showRules: false, openCat: null, testMode: false, showGameRules: false,
     idPanel: null, idPasteConfirm: null,
-    error: message || "", screen: "home",
+    error: message || "", screen: "home", closeConfirm: null, roomBusy: "",
   });
   render();
+  // スタート画面に戻ったら「最近の部屋」を取り直す（さっきまでいた部屋がここに出る）
+  refreshMyRooms();
 }
 
 // ---------- 操作 ----------
@@ -241,6 +288,38 @@ W.joinRoom = () => {
   connect(code, { type: "join", playerId: state.playerId, name: state.name });
 };
 W.resetToTitleBtn = () => resetToTitle();
+
+// ---------- 最近の部屋（入り直す／片付ける） ----------
+W.enterMyRoom = (code) => {
+  state.name = (document.getElementById("name-input") || {}).value || state.name;
+  if (!state.name) { state.error = "名前を入力してください"; return render(); }
+  localStorage.setItem("daifugo-name", state.name);
+  connect(code, { type: "join", playerId: state.playerId, name: state.name });
+};
+W.askCloseRoom = (code) => { state.closeConfirm = code; state.error = ""; render(); };
+W.cancelCloseRoom = () => { state.closeConfirm = null; render(); };
+W.closeMyRoom = () => {
+  const code = state.closeConfirm;
+  state.closeConfirm = null;
+  state.roomBusy = code;
+  state.error = "";
+  render();
+  fetch(`/api/room/${encodeURIComponent(code)}/close`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ playerId: state.playerId }),
+  })
+    .then((r) => r.json())
+    .then((d) => {
+      state.roomBusy = "";
+      if (!d.ok) { state.error = d.error || "消せませんでした"; return render(); }
+      forgetRoom(code);
+      state.error = `部屋「${code}」を消しました`;
+      refreshMyRooms();
+      render();
+    })
+    .catch(() => { state.roomBusy = ""; state.error = "つながりませんでした"; render(); });
+};
+W.forgetMyRoom = (code) => { forgetRoom(code); refreshMyRooms(); render(); };
 
 // 開発用：部屋コードのやり取りを省いて、決め打ちの部屋に直行する（?dev=1 のときだけ出る）
 const DEV_CODE = "DEV0";
@@ -338,7 +417,23 @@ W.adminLogin = () => {
       render();
     });
 };
-W.adminSetTab = (tab) => { state.adminTab = tab; render(); };
+W.adminSetTab = (tab) => {
+  state.adminTab = tab;
+  render();
+  // 部屋一覧は開いたときに取りに行く（生きているかを1部屋ずつ確かめるので、毎回は重い）
+  if (tab === "rooms") W.adminLoadRooms();
+};
+W.adminLoadRooms = () => {
+  state.adminRooms = "loading";
+  render();
+  fetch("/api/admin/rooms", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ key: state.adminKey }),
+  })
+    .then((r) => r.json())
+    .then((d) => { state.adminRooms = d.ok ? d : null; if (!d.ok) state.error = d.error || "失敗しました"; render(); })
+    .catch(() => { state.adminRooms = null; state.error = "つながりませんでした"; render(); });
+};
 W.abortGame = () => { state.menu = null; send({ type: "abort", asPlayerId: null }); };
 W.disbandRoom = () => { state.menu = null; send({ type: "disband", asPlayerId: null }); };
 W.toggleTestMode = () => { state.testMode = !state.testMode; render(); };
@@ -569,6 +664,40 @@ function idOverlay() {
     ${state.error ? `<p class="err mt-3 text-center text-sm">${esc(state.error)}</p>` : ""}
   </div></div>`;
 }
+// スタート画面に出す「最近の部屋」。この端末が入った部屋のうち、まだ生きているものだけ並ぶ。
+// 作った部屋を片付けるためと、うっかり抜けたときに戻るための両方に使う
+const ROOM_STATE_LABEL = { waiting: "待機中", playing: "対戦中", exchange: "カード交換中", finished: "結果表示中" };
+function myRoomsBox() {
+  if (state.closeConfirm) {
+    return `<div class="myrooms">
+      <p class="t-main text-sm text-center mb-1">部屋「${esc(state.closeConfirm)}」を消しますか？</p>
+      <p class="t-dim text-[11px] text-center mb-2">中にいる人はスタート画面に戻ります。元には戻せません。</p>
+      <div class="flex gap-2">
+        <button onclick="cancelCloseRoom()" class="btn-sub flex-1 py-2 rounded-lg text-sm">やめる</button>
+        <button onclick="closeMyRoom()" class="btn-play flex-1 py-2 rounded-lg text-sm font-bold">消す</button>
+      </div></div>`;
+  }
+  if (!state.myRooms.length) return "";
+  return `<div class="myrooms">
+    <p class="t-dim text-xs mb-2">最近の部屋</p>
+    ${state.myRooms.map((r) => {
+      const busy = state.roomBusy === r.code;
+      const label = r.unknown ? "様子が分かりません"
+        : `${ROOM_STATE_LABEL[r.status] || r.status} ・ ${r.humans}人${r.connected === 0 ? "（誰もいません）" : ""}`;
+      return `<div class="myroom">
+        <div class="myroom-main">
+          <span class="myroom-code">${esc(r.code)}</span>
+          <span class="myroom-state">${esc(label)}${r.mine ? " ・自分が作った部屋" : ""}</span>
+        </div>
+        <button onclick="enterMyRoom('${esc(r.code)}')" ${busy ? "disabled" : ""} class="btn-sub myroom-btn">入る</button>
+        ${r.canClose
+          ? `<button onclick="askCloseRoom('${esc(r.code)}')" ${busy ? "disabled" : ""} class="btn-sub myroom-btn myroom-del">${busy ? "…" : "消す"}</button>`
+          : `<button onclick="forgetMyRoom('${esc(r.code)}')" class="btn-sub myroom-btn" title="一覧から外すだけで、部屋は消えません">×</button>`}
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
 function rulesPanel(editable) {
   const rules = editable ? state.draftRules : state.room.rules;
   const activeId = activePresetId(rules);
@@ -641,6 +770,7 @@ function paint() {
         <div class="divider"><span>または</span></div>
         <input id="code-input" placeholder="部屋コード" maxlength="16" class="inp w-full mb-3 px-3 py-2 rounded-lg tracking-widest text-center uppercase" />
         <button onclick="joinRoom()" class="btn-sub w-full py-3 rounded-lg font-bold">部屋に参加する</button>
+        ${myRoomsBox()}
         ${IS_DEV ? `<div class="devbox mt-4">
           <p class="dev-t">開発者メニュー</p>
           <button onclick="devEnter()" class="btn-sub w-full py-2 rounded-lg font-bold text-sm">開発部屋に入る</button>
@@ -682,8 +812,32 @@ function paint() {
       <div class="flex gap-2 mb-3">
         <button onclick="adminSetTab('players')" class="btn-sub flex-1 py-2 rounded-lg text-sm ${state.adminTab === "players" ? "font-bold" : ""}">プレイヤー台帳</button>
         <button onclick="adminSetTab('events')" class="btn-sub flex-1 py-2 rounded-lg text-sm ${state.adminTab === "events" ? "font-bold" : ""}">最近の出来事</button>
+        <button onclick="adminSetTab('rooms')" class="btn-sub flex-1 py-2 rounded-lg text-sm ${state.adminTab === "rooms" ? "font-bold" : ""}">部屋</button>
       </div>
-      ${state.adminTab === "players" ? `
+      ${state.adminTab === "rooms" ? `
+        <div class="panel rounded-xl p-3 admin-table-wrap">
+          ${state.adminRooms === "loading" ? `<p class="t-dim text-center py-3">1部屋ずつ生きているか確かめています…</p>`
+            : !state.adminRooms ? `<p class="t-dim text-center py-3">読み込めませんでした
+              <button onclick="adminLoadRooms()" class="btn-sub px-3 py-1 rounded-lg text-sm ml-2">やり直す</button></p>`
+            : `<div class="admin-head">
+                 <span class="t-dim text-xs">いま生きている部屋だけを出しています${
+                   state.adminRooms.removed ? `（もう無い${state.adminRooms.removed}件は一覧から外しました）` : ""}</span>
+                 <button onclick="adminLoadRooms()" class="btn-sub px-3 py-1 rounded-lg text-sm">更新</button>
+               </div>
+               <table class="admin-table"><thead><tr>
+                 <th>部屋コード</th><th>作った人</th><th>作成</th><th>状態</th><th>人数</th><th>接続中</th>
+               </tr></thead><tbody>
+                 ${state.adminRooms.rooms.length ? state.adminRooms.rooms.map((r) => `<tr>
+                   <td>${esc(r.code)}</td>
+                   <td>${esc(r.by || "—")}</td>
+                   <td>${r.createdAt ? fmt(r.createdAt) : "—"}</td>
+                   <td>${esc(ROOM_STATE_LABEL[r.status] || r.status || "—")}</td>
+                   <td>${r.humans == null ? "—" : r.humans}</td>
+                   <td>${r.connected == null ? "—" : r.connected}</td>
+                 </tr>`).join("") : `<tr><td colspan="6" class="t-dim text-center py-3">いま生きている部屋はありません</td></tr>`}
+               </tbody></table>`}
+        </div>
+      ` : state.adminTab === "players" ? `
         <div class="panel rounded-xl p-3 admin-table-wrap">
           <table class="admin-table"><thead><tr>
             <th>個人ID</th><th>今の名前</th><th>初回</th><th>最終</th><th>使った名前</th><th>作成/参加</th>
@@ -932,6 +1086,7 @@ async function bootstrap() {
   localStorage.setItem(ID_KEY, state.playerId);
   render();
   syncNameFromServer(state.playerId);
+  refreshMyRooms();
 }
 
 // 名前はサーバー（個人IDに紐づく）が正。起動を止めないよう待たずに取りに行き、届いたら差し替える。

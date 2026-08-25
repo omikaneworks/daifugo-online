@@ -17,6 +17,8 @@ const PILE_MAX = 3;
 
 const DEFAULT_RULES = buildDefaultRules();
 
+const roomJsonRes = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json" } });
+
 // 部屋の合言葉（＝部屋コード）の正規化。前後の空白を落として大文字化し、
 // 長さだけ見る（文字種は特に制限しない。日本語も通す）。おかしければ null
 function normalizeCode(raw) {
@@ -76,6 +78,16 @@ export class DaifugoRoom {
   }
 
   async fetch(request) {
+    // WebSocket以外に、部屋の様子を尋ねる／片付けるための小さな経路を持つ。
+    // ルーターが /status /close だけをここへ通す
+    const path = new URL(request.url).pathname;
+    if (path.endsWith("/status") || path.endsWith("/close")) {
+      await this.ensureLoaded();
+      let body = {};
+      try { body = await request.json(); } catch { body = {}; }
+      return path.endsWith("/status") ? this.roomStatus(body) : this.roomClose(body);
+    }
+
     if (request.headers.get("Upgrade") !== "websocket") return new Response("Expected websocket", { status: 426 });
     await this.ensureLoaded();
 
@@ -131,6 +143,62 @@ export class DaifugoRoom {
     return null;
   }
 
+  // ---- 部屋の様子を尋ねる／片付ける（WebSocketを張らずにHTTPで） ----
+  // 「最近の部屋」の一覧と管理画面の部屋一覧が使う。
+  // 誰の名前も返さない（合言葉を総当たりされても中身が漏れないように）。
+  // 部屋が在るかどうかは join を試せば元々分かるので、ここで新しく漏れるものは無い
+  roomStatus(body) {
+    const r = this.room;
+    const playerId = String(body.playerId || "");
+    if (!r) return roomJsonRes({ ok: true, exists: false });
+    const connected = [...this.sessions.values()].filter(Boolean);
+    const humans = r.players.filter((p) => !p.isCPU && !p.isDummy);
+    return roomJsonRes({
+      ok: true, exists: true, code: r.code, status: r.status,
+      players: r.players.length, humans: humans.length,
+      connected: humans.filter((p) => connected.includes(p.id)).length,
+      createdAt: r.createdAt || null,
+      mine: !!playerId && r.createdBy === playerId,
+      joined: !!playerId && r.players.some((p) => p.id === playerId),
+      // 消してよいのは「作った人」「今のホスト」「誰も繋がっていない部屋」のいずれか
+      canClose: !!playerId && (r.createdBy === playerId || r.hostId === playerId
+        || humans.every((p) => !connected.includes(p.id))),
+    });
+  }
+
+  async roomClose(body) {
+    const r = this.room;
+    const playerId = String(body.playerId || "");
+    if (!r) return roomJsonRes({ ok: true, closed: true, already: true });
+    const connected = [...this.sessions.values()].filter(Boolean);
+    const humans = r.players.filter((p) => !p.isCPU && !p.isDummy);
+    const may = !!playerId && (r.createdBy === playerId || r.hostId === playerId
+      || humans.every((p) => !connected.includes(p.id)));
+    if (!may) return roomJsonRes({ ok: false, error: "その部屋は消せません（作った人・ホスト・誰もいない部屋だけ消せます）" });
+    // 中にいる人はスタート画面へ戻す。黙って消すと画面が固まったように見える
+    for (const [sock] of this.sessions.entries()) {
+      try { sock.send(JSON.stringify({ type: "disbanded" })); } catch { /* 切れていれば無視 */ }
+    }
+    const code = r.code;
+    this.room = null;
+    this.sessions.clear();
+    await this.state.storage.deleteAll();
+    this.logRoom("close", code);
+    return roomJsonRes({ ok: true, closed: true });
+  }
+
+  // 部屋の生き死にを ActivityLog の索引へ伝える。Durable Object は一覧できないので、
+  // 「どんな合言葉の部屋が作られたか」を別に控えておかないと管理画面で並べられない。
+  // 結果は待たない・失敗しても無視する（logEvent と同じ考え方。対戦は絶対に止めない）
+  logRoom(kind, code, name, playerId) {
+    this.env.LOG.get(this.env.LOG.idFromName("log"))
+      .fetch("https://log/room", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ kind, code, name, playerId }),
+      })
+      .catch(() => {});
+  }
+
   // 8切り・革命などを画面に大きく出すための合図。ログの小さい1行だけだと見落とすため。
   // id は「まだ見せていない効果かどうか」をクライアントが見分けるための通し番号で、
   // これが無いと部屋に入り直すたびに過去の効果が再生されてしまう
@@ -163,8 +231,10 @@ export class DaifugoRoom {
     // 人が一人もいなくなった部屋は残す意味がないので消す（CPU・ダミーだけの部屋も同様）
     const humans = r.players.filter((p) => !p.isCPU && !p.isDummy);
     if (humans.length === 0) {
+      const code = r.code;
       this.room = null;
       await this.state.storage.deleteAll();
+      this.logRoom("close", code);
       return;
     }
     if (r.hostId === playerId) {
@@ -206,6 +276,9 @@ export class DaifugoRoom {
   newRoom(code, playerId, name) {
     return {
       code, status: "waiting", hostId: playerId, testMode: false,
+      // 作った人と作った時刻。「自分が作った部屋」の判定と管理画面の一覧に使う。
+      // hostId は抜けると他の人へ移るので、作った人を別に控えておく必要がある
+      createdBy: playerId, createdAt: Date.now(),
       players: [{ id: playerId, name, hand: [], handCount: 0, finished: false, finishOrder: null }],
       order: [], seatOrder: null, field: null, direction: 1,
       suitLockActive: null, colorLockActive: null, numberLockActive: null,
@@ -241,6 +314,7 @@ export class DaifugoRoom {
       this.room = this.newRoom(code, playerId, msg.name);
       this.sessions.set(ws, playerId);
       this.logEvent("create", msg.name, code, playerId);
+      this.logRoom("open", code, msg.name, playerId);
       await this.persistAndBroadcast();
       return;
     }
@@ -302,9 +376,11 @@ export class DaifugoRoom {
       for (const [sock] of this.sessions.entries()) {
         try { sock.send(JSON.stringify({ type: "disbanded" })); } catch {}
       }
+      const closedCode = r.code;
       this.room = null;
       this.sessions.clear();
       await this.state.storage.deleteAll();
+      this.logRoom("close", closedCode);
       return;
     }
 
@@ -1255,6 +1331,8 @@ export class ActivityLog {
 
     await this.ensureMigrated();
     if (url.pathname === "/record") return this.record(body);
+    if (url.pathname === "/room") return this.recordRoom(body);
+    if (url.pathname === "/api/admin/rooms") return this.adminRooms(body, request);
     if (url.pathname === "/api/id/issue") return this.issueId();
     if (url.pathname === "/api/id/profile") return this.profile(body, request);
     if (url.pathname === "/api/admin/log") return this.adminLog(body, request);
@@ -1349,22 +1427,61 @@ export class ActivityLog {
     return logJsonRes({ ok: true });
   }
 
+  // 部屋の索引。Durable Object は「今どんな部屋があるか」を一覧できないので、
+  // 作られた合言葉をここに控えておく。1部屋1キー（`room:{code}`）で持ち、
+  // 部屋が消えたら落とす。DaifugoRoom から fire-and-forget で呼ばれる
+  async recordRoom(body) {
+    const code = String(body.code || "").slice(0, 20);
+    if (!code) return logJsonRes({ ok: false });
+    if (body.kind === "close") {
+      await this.state.storage.delete(`room:${code}`);
+      return logJsonRes({ ok: true });
+    }
+    if (body.kind !== "open") return logJsonRes({ ok: false });
+    await this.state.storage.put(`room:${code}`, {
+      code, createdAt: Date.now(),
+      by: String(body.name || "").slice(0, 20),
+      byId: String(body.playerId || ""),
+    });
+    return logJsonRes({ ok: true });
+  }
+
+  // 管理画面の部屋一覧。索引は「候補」でしかない（fire-and-forget なので取りこぼしうる）。
+  // 生きているかどうかはワーカー側が1部屋ずつ聞いて確かめ、死んでいた分は prune で落とす
+  async adminRooms(body, request) {
+    if (Array.isArray(body.prune)) {
+      for (const c of body.prune.slice(0, 200)) await this.state.storage.delete(`room:${String(c)}`);
+      return logJsonRes({ ok: true });
+    }
+    const denied = await this.adminGate(body, request);
+    if (denied) return denied;
+    const rooms = [];
+    for (const [, v] of await this.state.storage.list({ prefix: "room:" })) rooms.push(v);
+    rooms.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    return logJsonRes({ ok: true, rooms });
+  }
+
+  // 管理キーの確認。通れば null、弾いたらそのまま返すレスポンス
+  async adminGate(body, request) {
+    if (this.env.DAIFUGO_DEV === "1") return null;
+    const ip = request.headers.get("CF-Connecting-IP") || "local";
+    const key = "admin:" + ip;
+    const wait = await this.waitSec(key);
+    if (wait > 0) return logJsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
+    const master = this.env.DAIFUGO_MASTER_KEY;
+    if (!master) return logJsonRes({ ok: false, error: "管理キーが未設定です（wrangler secret put DAIFUGO_MASTER_KEY）" });
+    if (!logSafeEqual(master, body.key)) {
+      await this.addFail(key);
+      return logJsonRes({ ok: false, error: "管理キーが違います" });
+    }
+    await this.clearFail(key);
+    return null;
+  }
+
   // 管理画面から。管理キーで保護する（PrivateRegistry・UserRegistryと同じ考え方）
   async adminLog(body, request) {
-    const ip = request.headers.get("CF-Connecting-IP") || "local";
-    const devOpen = this.env.DAIFUGO_DEV === "1";
-    if (!devOpen) {
-      const key = "admin:" + ip;
-      const wait = await this.waitSec(key);
-      if (wait > 0) return logJsonRes({ ok: false, error: `続けて間違えています。${wait}秒ほど待ってからお試しください` });
-      const master = this.env.DAIFUGO_MASTER_KEY;
-      if (!master) return logJsonRes({ ok: false, error: "管理キーが未設定です（wrangler secret put DAIFUGO_MASTER_KEY）" });
-      if (!logSafeEqual(master, body.key)) {
-        await this.addFail(key);
-        return logJsonRes({ ok: false, error: "管理キーが違います" });
-      }
-      await this.clearFail(key);
-    }
+    const denied = await this.adminGate(body, request);
+    if (denied) return denied;
     const events = ((await this.state.storage.get("events")) || []).slice().reverse();
     // 台帳は1人1キー。画面に返す形は今までどおり { id: レコード } にまとめ直す
     const players = {};
@@ -1382,12 +1499,14 @@ export default {
     // 一般の部屋。合言葉（2〜16文字。日本語も通す）がそのままDOの識別子になる。
     // 日本語はURLに乗ると percent-encoding で長さが膨らむので、正規表現では
     // 長さを見ず「スラッシュを含まない1区間」とだけ捉え、長さは decode した後に見る
-    const m = url.pathname.match(/^\/api\/room\/([^/]+)\/ws$/);
+    // ws=対戦の接続、status=様子を尋ねる、close=片付ける
+    const m = url.pathname.match(/^\/api\/room\/([^/]+)\/(ws|status|close)$/);
     if (m) {
       let decoded;
       try { decoded = decodeURIComponent(m[1]); } catch { decoded = ""; }
       const code = normalizeCode(decoded);
       if (!code) return new Response("Bad room code", { status: 400 });
+      if (m[2] !== "ws" && request.method !== "POST") return new Response("Method not allowed", { status: 405 });
       const id = env.ROOM.idFromName(code);
       return env.ROOM.get(id).fetch(request);
     }
@@ -1403,6 +1522,41 @@ export default {
     if (url.pathname === "/api/admin/log") {
       if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
       return env.LOG.get(env.LOG.idFromName("log")).fetch(request);
+    }
+
+    // 管理画面の部屋一覧。索引（候補）を受け取り、1部屋ずつ生きているか確かめてから返す。
+    // 索引は fire-and-forget で書いているので取りこぼしうる。ここで確かめて、
+    // もう無い部屋は索引からも落とす（放っておくと死んだ部屋が並び続ける）
+    if (url.pathname === "/api/admin/rooms") {
+      if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+      let body = {};
+      try { body = await request.clone().json(); } catch { body = {}; }
+      const log = env.LOG.get(env.LOG.idFromName("log"));
+      const idx = await (await log.fetch("https://log/api/admin/rooms", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key: body.key }),
+      })).json();
+      if (!idx.ok) return new Response(JSON.stringify(idx), { headers: { "content-type": "application/json" } });
+
+      const live = [], dead = [];
+      for (const rec of idx.rooms.slice(0, 100)) {
+        let st = { exists: false };
+        try {
+          st = await (await env.ROOM.get(env.ROOM.idFromName(rec.code)).fetch(
+            `https://room/api/room/${encodeURIComponent(rec.code)}/status`,
+            { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json();
+        } catch { /* 聞けなければ死んでいる扱いにはしない */ st = { exists: true, unknown: true }; }
+        if (st.exists) live.push({ ...rec, ...st });
+        else dead.push(rec.code);
+      }
+      if (dead.length) {
+        log.fetch("https://log/api/admin/rooms", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ prune: dead }),
+        }).catch(() => {});
+      }
+      return new Response(JSON.stringify({ ok: true, rooms: live, removed: dead.length }),
+        { headers: { "content-type": "application/json" } });
     }
 
     // 静的ファイルの配信は GET/HEAD だけ。本文つきの POST を流すと配信側が落ちる
