@@ -1,5 +1,4 @@
 import { RULE_CATEGORIES, buildDefaultRules, PRESETS, presetRules, sameRules } from "./rules.js";
-import { qrSVG } from "./qr.js";
 
 // --- 自作プリセット（この端末に保存される）---
 const CUSTOM_KEY = "daifugo-presets";
@@ -500,8 +499,7 @@ function idOverlay() {
     </div>
     ${showMode ? `
       <p class="t-dim text-xs text-center mb-2">別の端末で「他の端末に合わせる」を開き、これを入力してください</p>
-      <p class="id-text">${esc(formatPersonalId(state.playerId))}</p>
-      ${qrSVG(state.playerId) || ""}
+      <p class="id-text id-big">${esc(formatPersonalId(state.playerId))}</p>
       <button onclick="copyMyId()" class="btn-sub w-full py-2 mt-3 rounded-lg text-sm">IDをコピー</button>
     ` : `
       <p class="t-dim text-xs text-center mb-2">先ほどの端末で表示したIDを、ここに入力してください</p>
@@ -591,7 +589,7 @@ function paint() {
           無ければその場で作られ、すでにあれば参加します。名前が空なら「開発者」になります。</p>
         </div>` : ""}
         ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
-        <button onclick="openIdPanel()" class="id-link">マイページ</button>
+        <button onclick="openIdPanel()" class="id-link">マイページ（${esc(formatPersonalId(state.playerId))}）</button>
       </div></div>${idOverlay()}`;
     return;
   }

@@ -13,9 +13,11 @@ public/index.html   HTMLシェル。スタイル(CSS変数によるライト/ナ
 public/app.js        フロントエンドのロジック（画面描画・WebSocket通信）。
 public/rules.js       ルールカタログ。src/index.js と public/app.js の両方が
                      この1ファイルをimportして使う「ルール定義の唯一のソース」。
-public/qr.js         短い文字列（端末のID）をQRで見せるための自前エンコーダ。
-                     外部ライブラリなし・V5固定。app.js からのみ使う。
 ```
+
+かつて `public/qr.js`（個人IDをQRで見せる自前エンコーダ）があったが、個人IDが
+8桁の数字になって**読み取っても結局手で打つことになった**ため削除した（`8/25`）。
+戻したくなったら `git show cdc8a42:public/qr.js`。
 
 ## ルールを追加/変更するとき
 

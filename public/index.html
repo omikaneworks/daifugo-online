@@ -119,18 +119,18 @@ button:disabled{opacity:.3}
 .devbox{border:1px dashed var(--border);border-radius:10px;padding:10px;margin-bottom:8px}
 .dev-t{font-size:.82rem;color:var(--dim);margin:0 0 6px;letter-spacing:.05em}
 .dev-note{font-size:.78rem;color:var(--dim);line-height:1.45;margin:6px 0 0}
-/* パソコンとスマホを同じ人として使いたいときだけ使う「端末のID」入口。
-   普段は押す人がほぼいない大きさ・色にして視界の邪魔をしない */
+/* マイページ（名前の変更・個人ID）の入口。自分の番号を普段から目に入れておきたいので
+   番号を添えるが、押す人はほぼいないので大きさ・色は控えめのままにする */
 .id-link{display:block;width:100%;margin-top:14px;background:none;border:none;
   color:var(--dim);opacity:.55;font-size:.78rem;text-align:center;
   text-decoration:underline;cursor:pointer}
 .id-link:hover{opacity:.85}
-/* 端末のID・UUIDの表示。長い英数字なので等幅にして折り返す */
+/* 個人IDの表示。等幅にして桁を数えやすくする */
 .id-text{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.85rem;
   word-break:break-all;text-align:center;color:var(--text);
   background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px}
-/* IDのQR。ナイトモードでも読めるよう、白地は qr.js 側で固定にしている */
-.qr-svg{display:block;width:100%;max-width:220px;margin:10px auto 0;border-radius:6px}
+/* 見せる面の個人ID。相手に読み上げる・書き写す用なので大きく間隔を空ける */
+.id-big{font-size:1.6rem;font-weight:700;letter-spacing:.12em;padding:14px 10px}
 /* 管理画面（プレイヤー台帳・活動ログ）。誰にもリンクしない隠しページ用 */
 .admin-head{display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center;margin-bottom:12px}
 .admin-table-wrap{overflow-x:auto}
