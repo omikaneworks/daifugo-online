@@ -309,6 +309,22 @@ export class DaifugoRoom {
       return;
     }
 
+    // 名前を変える（マイページから。対戦中でも呼べる）。
+    // 変えられるのは自分の席の名前だけなので、ホスト権限は要らない
+    if (type === "rename") {
+      const name = String(msg.name || "").trim().slice(0, 20);
+      if (!name) return;
+      const p = r.players.find((pl) => pl.id === playerId);
+      if (!p) return;
+      const old = p.name;
+      if (old === name) return;
+      p.name = name;
+      r.log.push(`${old} が ${name} に名前を変更しました`);
+      this.logEvent("rename", name, r.code, playerId);
+      await this.persistAndBroadcast();
+      return;
+    }
+
     if (type === "setRules") {
       if (playerId !== r.hostId) { ws.send(JSON.stringify({ type: "error", message: "ホストだけが変更できます" })); return; }
       if (r.status !== "waiting") { ws.send(JSON.stringify({ type: "error", message: "開始後は変更できません" })); return; }
@@ -1132,6 +1148,15 @@ const NAMES_MAX = 10;     // 1人あたり、直近この個数の名前だけ�
 
 const logJsonRes = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json" } });
 
+// 個人IDは8桁の数字。先頭が0の番号（"00123456"）も正規のIDなので、
+// どこでも数値に変換せず必ず文字列のまま扱うこと（数値にすると桁が落ちて別のIDになる）
+const ID_ISSUE_TRIES = 10;
+function randomDigits8() {
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return String(buf[0] % 100000000).padStart(8, "0");
+}
+
 // 一致するまでの時間で中身を推測されないよう、必ず最後まで比較する
 function logSafeEqual(a, b) {
   const enc = new TextEncoder();
@@ -1181,15 +1206,30 @@ export class ActivityLog {
     try { body = await request.json(); } catch { body = {}; }
 
     if (url.pathname === "/record") return this.record(body);
+    if (url.pathname === "/api/id/issue") return this.issueId();
     if (url.pathname === "/api/admin/log") return this.adminLog(body, request);
     return new Response("Not found", { status: 404 });
+  }
+
+  // 個人IDを発行する。誰でも自分の番号をもらえるべきものなので管理キーは要らない。
+  // 発行済み番号は `issued:{id}` の個別キーで持つ（players のように1つのオブジェクトに
+  // まとめない）。重複確認が get 1回で済み、発行数が増えても遅くならないため
+  async issueId() {
+    for (let i = 0; i < ID_ISSUE_TRIES; i++) {
+      const id = randomDigits8();
+      if (await this.state.storage.get(`issued:${id}`)) continue;
+      await this.state.storage.put(`issued:${id}`, Date.now());
+      return logJsonRes({ ok: true, id });
+    }
+    // 10回とも埋まっていた（現実にはまず起きない）。クライアント側が自前生成に切り替える
+    return logJsonRes({ ok: false });
   }
 
   // DaifugoRoom からだけ呼ばれる内部経路。認証不要（Workerのルーターがこの経路を
   // ブラウザへは公開していない）。fire-and-forgetで呼ばれるので失敗しても影響は無い
   async record(body) {
     const ts = Date.now();
-    const kind = body.kind === "create" || body.kind === "join" ? body.kind : null;
+    const kind = ["create", "join", "rename"].includes(body.kind) ? body.kind : null;
     const playerId = String(body.playerId || "");
     const name = String(body.name || "").slice(0, 20);
     const code = String(body.code || "").slice(0, 20);
@@ -1209,8 +1249,9 @@ export class ActivityLog {
       p.names.push(name);
       while (p.names.length > NAMES_MAX) p.names.shift();
     }
+    // rename は「遊んだ回数」ではないので数えない（names への追加と lastSeenAt の更新だけ）
     if (kind === "create") p.createCount = (p.createCount || 0) + 1;
-    else p.joinCount = (p.joinCount || 0) + 1;
+    else if (kind === "join") p.joinCount = (p.joinCount || 0) + 1;
     players[playerId] = p;
     await this.state.storage.put("players", players);
 
@@ -1254,6 +1295,12 @@ export default {
       if (!code) return new Response("Bad room code", { status: 400 });
       const id = env.ROOM.idFromName(code);
       return env.ROOM.get(id).fetch(request);
+    }
+
+    // 個人IDの発行。初めて遊ぶ端末が1回だけ呼ぶ。管理キーは要らない
+    if (url.pathname === "/api/id/issue") {
+      if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+      return env.LOG.get(env.LOG.idFromName("log")).fetch(request);
     }
 
     // 管理画面（プレイヤー台帳・活動ログ）。誰にもリンクしない隠しページ用のAPI

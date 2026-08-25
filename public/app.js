@@ -19,7 +19,25 @@ const SUIT_SYMBOL = { S: "♠", H: "♥", D: "♦", C: "♣", JOKER: "★" };
 const SUIT_COLOR = { S: "c-black", H: "c-red", D: "c-red", C: "c-black", JOKER: "c-joker" };
 const PICK_RANKS = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
-const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2));
+// --- 個人ID ---
+// サーバーが発行する8桁の数字。重複しないことはサーバー側が確認してから渡してくれる。
+// 先頭が0の番号（"00123456"）も正規のIDなので、必ず文字列のまま扱うこと。
+// 旧キー daifugo-pid（端末側で作っていた36文字のUUID）は消さずに引き継ぐ
+const ID_KEY = "daifugo-personal-id";
+const OLD_ID_KEY = "daifugo-pid";
+const readPersonalId = () => localStorage.getItem(ID_KEY) || localStorage.getItem(OLD_ID_KEY) || "";
+// 見せるときだけ4桁ずつに区切る。コピー・QR・サーバーに送る値は区切り無しのまま
+const formatPersonalId = (id) => (/^\d{8}$/.test(id) ? id.slice(0, 4) + " " + id.slice(4) : id);
+async function issuePersonalId() {
+  try {
+    const r = await fetch("/api/id/issue", { method: "POST" });
+    const d = await r.json();
+    if (d.ok && d.id) return String(d.id);
+  } catch { /* 下のフォールバックへ */ }
+  // 発行に失敗してもアプリが始まらない事態にはしない（遊べなくなる方が害が大きい）。
+  // この経路で作ったIDだけは一意性が保証されない
+  return String(Math.floor(Math.random() * 1e8)).padStart(8, "0");
+}
 const effRev = (r) => !!r.revolution !== !!r.tempReverse;
 // 手札の並びは常に 3→2（Joker は右端）。革命・一時反転で強弱が逆になっても
 // 並べ替えない（同じ札が毎回同じ位置にある方が探しやすいため）
@@ -41,18 +59,17 @@ function badgeColor(label) {
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 const state = {
-  playerId: localStorage.getItem("daifugo-pid") || uuid(),
+  playerId: readPersonalId(),
   name: localStorage.getItem("daifugo-name") || "",
   night: localStorage.getItem("daifugo-night") === "1",
   screen: "home", room: null, error: "", selected: [], ws: null,
   showRules: false, openCat: null, draftRules: null,
   testMode: false, showGameRules: false, menu: null, code: "",
-  // 端末のIDを見せる／合わせるパネル。null="閉じている"・"show"="見せる面"・"paste"="合わせる面"
+  // マイページ。null="閉じている"・"show"="IDを見せる面"・"paste"="他の端末に合わせる面"
   idPanel: null, idPasteConfirm: null,
   // 管理画面（プレイヤー台帳・活動ログ）。プレイヤー向けのどの画面にもリンクしない隠しページ
   adminKey: "", adminData: null, adminTab: "players", adminBusy: false,
 };
-localStorage.setItem("daifugo-pid", state.playerId);
 
 // 開発者モード：URLに ?dev=1 が付いているときだけテスト機能が見える。
 // 端末に記憶はしない（通常URLで開けば必ずOFF）。記憶すると、通常URLを開いた
@@ -191,8 +208,8 @@ W.leaveRoom = () => {
 W.toggleMenu = (v) => { state.menu = v || null; render(); };
 W.closeMenu = (e) => { if (e.target.classList.contains("overlay")) { state.menu = null; render(); } };
 
-// ---------- 端末のID（パソコンとスマホを同じ人として使いたいときだけ使う） ----------
-// daifugo-pid は「本人確認」ではなく「今回はこの人として扱う」というラベルでしかないので、
+// ---------- マイページ（名前の変更／個人IDを他の端末と合わせる） ----------
+// 個人IDは「本人確認」ではなく「今回はこの人として扱う」というラベルでしかないので、
 // 値をそのままコピーして別の端末に上書きすれば、それだけで同じ人として扱われる
 W.openIdPanel = () => { state.menu = null; state.idPanel = "show"; state.idPasteConfirm = null; render(); };
 W.closeIdPanel = (e) => { if (!e || e.target.classList.contains("overlay")) { state.idPanel = null; render(); } };
@@ -205,17 +222,34 @@ W.copyMyId = () => {
 };
 W.confirmIdPaste = () => {
   const el = document.getElementById("id-paste-input");
-  const v = ((el ? el.value : "") || "").trim();
-  // ここは秘密情報ではないので厳密な検証は要らない。UUIDらしい形かどうかだけ見る
-  if (!/^[0-9a-f-]{20,40}$/i.test(v)) { state.error = "IDの形が正しくありません"; return render(); }
+  // 画面は「1234 5678」と区切って見せているので、空白ごと打ち込まれる前提で取り除く
+  const v = ((el ? el.value : "") || "").replace(/\s/g, "");
+  // ここは秘密情報ではないので厳密な検証は要らない。8桁の数字か、昔のUUIDらしい形かだけ見る
+  if (!/^\d{8}$/.test(v) && !/^[0-9a-f-]{20,40}$/i.test(v)) {
+    state.error = "IDの形が正しくありません"; return render();
+  }
   if (v === state.playerId) { state.error = "もう同じIDです"; return render(); }
   state.idPasteConfirm = v;
   render();
 };
 W.cancelIdPasteConfirm = () => { state.idPasteConfirm = null; render(); };
 W.applyIdPaste = () => {
-  localStorage.setItem("daifugo-pid", state.idPasteConfirm);
+  localStorage.setItem(ID_KEY, state.idPasteConfirm);
   location.reload();
+};
+
+// 名前を変える。部屋に入っていればその場で全員の画面に反映し、
+// いなければ端末に覚えるだけ（次に部屋を作る／参加するときの名前欄に入る）
+W.confirmRename = () => {
+  const el = document.getElementById("rename-input");
+  const v = ((el ? el.value : "") || "").trim();
+  if (!v) { state.error = "名前を入力してください"; return render(); }
+  if (v === state.name) { state.error = "もう同じ名前です"; return render(); }
+  state.name = v;
+  localStorage.setItem("daifugo-name", v);
+  if (state.ws) send({ type: "rename", name: v, asPlayerId: null });
+  state.error = `名前を「${v}」に変更しました`;
+  render();
 };
 
 // ---------- 管理画面（プレイヤー台帳・活動ログ） ----------
@@ -434,9 +468,10 @@ function idOverlay() {
   if (!state.idPanel) return "";
   if (state.idPasteConfirm) {
     return `<div class="overlay overlay-center"><div class="overlay-body">
-      <p class="pop-t">この端末をそのIDに合わせますか？</p>
+      <p class="pop-t">この端末をこのIDに合わせますか？</p>
+      <p class="id-text my-3">${esc(formatPersonalId(state.idPasteConfirm))}</p>
       <p class="pop-d">今までこの端末で遊んだ記録は、別のIDのまま残ります。
-      以後この端末は貼り付けたIDの人として扱われます。</p>
+      以後この端末は、このIDの人として扱われます。</p>
       <div class="flex gap-2 mt-4">
         <button onclick="cancelIdPasteConfirm()" class="btn-sub rounded-lg py-3 font-bold" style="flex:1">やめる</button>
         <button onclick="applyIdPaste()" class="btn-play rounded-lg py-3 font-bold" style="flex:1">合わせる</button>
@@ -447,21 +482,32 @@ function idOverlay() {
   return `<div class="overlay overlay-center" onclick="closeIdPanel(event)"><div class="overlay-body">
     <div class="overlay-head"><span>マイページ</span>
       <button onclick="closeIdPanel()" class="btn-sub px-3 py-1 rounded-lg text-sm">閉じる</button></div>
-    <p class="t-dim text-xs text-center mb-3">パソコンとスマホなど、複数の端末を同じ人として
+
+    <label class="block t-dim text-sm mb-1">名前</label>
+    <div class="flex gap-2 mb-1">
+      <input id="rename-input" value="${esc(state.name)}" placeholder="あなたの名前"
+        maxlength="20" class="inp flex-1 px-3 py-2 rounded-lg" />
+      <button onclick="confirmRename()" class="btn-play px-4 rounded-lg font-bold text-sm">変更</button>
+    </div>
+    <p class="t-dim text-[11px] mb-4">名前はいつでも変えられます。個人IDは変わらないので、
+    名前を変えても同じ人として扱われます。</p>
+
+    <label class="block t-dim text-sm mb-1">個人ID</label>
+    <p class="t-dim text-xs mb-3">パソコンとスマホなど、複数の端末を同じ人として
     使いたいときに、ここでIDを合わせられます。</p>
     <div class="flex gap-2 mb-3">
       <button onclick="showIdShowMode()" class="btn-sub flex-1 py-2 rounded-lg text-sm ${showMode ? "font-bold" : ""}">このIDを見せる</button>
       <button onclick="showIdPasteMode()" class="btn-sub flex-1 py-2 rounded-lg text-sm ${!showMode ? "font-bold" : ""}">他の端末に合わせる</button>
     </div>
     ${showMode ? `
-      <p class="t-dim text-xs text-center mb-2">別の端末で「他の端末に合わせる」を開き、これを貼り付けてください</p>
-      <p class="id-text">${esc(state.playerId)}</p>
+      <p class="t-dim text-xs text-center mb-2">別の端末で「他の端末に合わせる」を開き、これを入力してください</p>
+      <p class="id-text">${esc(formatPersonalId(state.playerId))}</p>
       ${qrSVG(state.playerId) || ""}
       <button onclick="copyMyId()" class="btn-sub w-full py-2 mt-3 rounded-lg text-sm">IDをコピー</button>
     ` : `
-      <p class="t-dim text-xs text-center mb-2">先ほどの端末で表示したIDを、ここに貼り付けてください</p>
-      <input id="id-paste-input" placeholder="貼り付けたIDを入れる" autocomplete="off" spellcheck="false"
-        class="inp w-full mb-2 px-3 py-2 rounded-lg text-center id-text" />
+      <p class="t-dim text-xs text-center mb-2">先ほどの端末で表示したIDを、ここに入力してください</p>
+      <input id="id-paste-input" placeholder="例：1234 5678" autocomplete="off" spellcheck="false"
+        inputmode="numeric" class="inp w-full mb-2 px-3 py-2 rounded-lg text-center id-text" />
       <button onclick="confirmIdPaste()" class="btn-play w-full py-3 rounded-lg font-bold">このIDに合わせる</button>
     `}
     ${state.error ? `<p class="err mt-3 text-center text-sm">${esc(state.error)}</p>` : ""}
@@ -516,6 +562,15 @@ function render() { paint(); layoutHand(); requestAnimationFrame(layoutHand); }
 function paint() {
   const app = document.getElementById("app");
 
+  // 初めて遊ぶ端末が個人IDをもらってくる間だけ出る。2回目以降は通信しないので出ない
+  if (state.screen === "issuing") {
+    app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-3">
+      <h1 class="title">大富豪</h1>
+      <span class="t-dim text-sm">はじめての準備をしています…</span>
+    </div>`;
+    return;
+  }
+
   if (state.screen === "home") {
     app.innerHTML = `<div class="min-h-screen flex items-center justify-center p-4">
       <div class="w-full max-w-sm panel rounded-2xl p-6">
@@ -565,8 +620,9 @@ function paint() {
         <span class="flex gap-2">${nightBtn()}
           <button onclick="location.reload()" class="btn-sub px-3 py-1 rounded-lg text-sm">閉じる</button></span>
       </div>
-      <p class="t-dim text-xs mb-3">個人ID（端末のID）は端末やブラウザが変わると別物になることがあります。
-      同じIDだからといって同一人物とは限りません。</p>
+      <p class="t-dim text-xs mb-3">個人IDはサーバーが発行するので、番号が重複することはありません。
+      ただしIDは端末のブラウザに保存されているだけなので、データを消す・別のブラウザを使うなどすると
+      新しいIDになります（その場合は別人として記録されます）。マイページでIDを合わせた端末は同じ1件にまとまります。</p>
       <div class="flex gap-2 mb-3">
         <button onclick="adminSetTab('players')" class="btn-sub flex-1 py-2 rounded-lg text-sm ${state.adminTab === "players" ? "font-bold" : ""}">プレイヤー台帳</button>
         <button onclick="adminSetTab('events')" class="btn-sub flex-1 py-2 rounded-lg text-sm ${state.adminTab === "events" ? "font-bold" : ""}">最近の出来事</button>
@@ -592,7 +648,7 @@ function paint() {
           </tr></thead><tbody>
             ${d.events && d.events.length ? d.events.map((e) => `<tr>
               <td>${fmt(e.ts)}</td>
-              <td>${e.kind === "create" ? "作成" : "参加"}</td>
+              <td>${{ create: "作成", join: "参加", rename: "改名" }[e.kind] || esc(e.kind || "")}</td>
               <td>${esc(e.name)}</td>
               <td>${esc(e.code)}</td>
               <td class="id-text-sm">${esc((e.playerId || "").slice(0, 8))}</td>
@@ -804,5 +860,19 @@ function paint() {
   </div>`;
 }
 
+// 個人IDを用意してからアプリを始める。
+// 既にIDを持っている端末（2回目以降・旧UUID勢）では通信は起きず、そのまま描画に入る
+async function bootstrap() {
+  if (!state.playerId) {
+    const back = state.screen;   // ?admin=1 で来た場合の行き先を潰さない
+    state.screen = "issuing";
+    render();
+    state.playerId = await issuePersonalId();
+    state.screen = back;
+  }
+  localStorage.setItem(ID_KEY, state.playerId);
+  render();
+}
+
 document.body.classList.toggle("night", state.night);
-render();
+bootstrap();
