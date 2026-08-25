@@ -22,10 +22,10 @@ const PICK_RANKS = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 // --- 個人ID ---
 // サーバーが発行する8桁の数字。重複しないことはサーバー側が確認してから渡してくれる。
 // 先頭が0の番号（"00123456"）も正規のIDなので、必ず文字列のまま扱うこと。
-// 旧キー daifugo-pid（端末側で作っていた36文字のUUID）は消さずに引き継ぐ
+// 端末側で作っていた頃の36文字のUUID（旧キー daifugo-pid）は引き継がない。
+// 引き継ぐと、昔から遊んでいる端末にはいつまでも8桁が出てこないため
 const ID_KEY = "daifugo-personal-id";
-const OLD_ID_KEY = "daifugo-pid";
-const readPersonalId = () => localStorage.getItem(ID_KEY) || localStorage.getItem(OLD_ID_KEY) || "";
+const readPersonalId = () => localStorage.getItem(ID_KEY) || "";
 // 見せるときだけ4桁ずつに区切る。コピー・QR・サーバーに送る値は区切り無しのまま
 const formatPersonalId = (id) => (/^\d{8}$/.test(id) ? id.slice(0, 4) + " " + id.slice(4) : id);
 async function issuePersonalId() {
@@ -87,8 +87,9 @@ if (ENTRY_ADMIN) {
   history.replaceState(null, "", location.pathname + (rest ? "?" + rest : ""));
   state.screen = "adminlog";
 }
-// 使わなくなった値の後始末（開発者モードの記憶方式・身内ルームの合言葉と部屋コード）
-for (const k of ["daifugo-dev", "daifugo-pass", "daifugo-code"]) localStorage.removeItem(k);
+// 使わなくなった値の後始末（開発者モードの記憶方式・身内ルームの合言葉と部屋コード・
+// 端末側で作っていた頃の個人ID）
+for (const k of ["daifugo-dev", "daifugo-pass", "daifugo-code", "daifugo-pid"]) localStorage.removeItem(k);
 
 // ダミー席がある部屋は必ずテストモード（誰も自動で着手しないため）
 function effTestMode() {
@@ -224,10 +225,8 @@ W.confirmIdPaste = () => {
   const el = document.getElementById("id-paste-input");
   // 画面は「1234 5678」と区切って見せているので、空白ごと打ち込まれる前提で取り除く
   const v = ((el ? el.value : "") || "").replace(/\s/g, "");
-  // ここは秘密情報ではないので厳密な検証は要らない。8桁の数字か、昔のUUIDらしい形かだけ見る
-  if (!/^\d{8}$/.test(v) && !/^[0-9a-f-]{20,40}$/i.test(v)) {
-    state.error = "IDの形が正しくありません"; return render();
-  }
+  // ここは秘密情報ではないので厳密な検証は要らない。8桁の数字かどうかだけ見る
+  if (!/^\d{8}$/.test(v)) { state.error = "個人IDは8桁の数字です"; return render(); }
   if (v === state.playerId) { state.error = "もう同じIDです"; return render(); }
   state.idPasteConfirm = v;
   render();
