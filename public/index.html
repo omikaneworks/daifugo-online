@@ -111,6 +111,44 @@ button:disabled{opacity:.3}
 .field .pile-g.old .card.small .jk-face{font-size:22px}
 .field .pile-g.old .card.small .jk-txt{font-size:7px}
 .logline{padding:0 16px;font-size:.82rem;color:var(--dim);height:21px;text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+
+/* ---- 場の効果を大きく出す（8切り・革命など）----
+   ログの小さい1行だけだと見落とすため、画面いっぱいにドンと出す。
+   pointer-events:none なので、出ている間も普通に操作できる（手を止めない） */
+#flash{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;
+  justify-content:center;gap:2px;pointer-events:none;z-index:60}
+#flash.flash-on{display:flex}
+/* 一瞬だけ画面を暗くして文字を目立たせる */
+#flash.flash-on::before{content:"";position:absolute;inset:0;animation:fx-veil 1.3s ease-out forwards}
+@keyframes fx-veil{0%{background:rgba(0,0,0,0)}18%{background:rgba(0,0,0,.42)}100%{background:rgba(0,0,0,0)}}
+.fx-line{position:relative;font-size:clamp(3rem,20vw,7rem);font-weight:900;letter-spacing:.04em;
+  line-height:1.05;text-align:center;white-space:nowrap;
+  animation:fx-pop 1.3s cubic-bezier(.18,1.5,.4,1) forwards}
+/* 同時に2つ3つ出るとき（革命＋8切り等）は少しずらして畳みかける */
+.fx-line:nth-child(2){animation-delay:.13s}
+.fx-line:nth-child(3){animation-delay:.26s}
+.fx-by{position:relative;margin-top:4px;font-size:1.15rem;font-weight:800;color:#fff;
+  letter-spacing:.02em;text-shadow:0 2px 8px rgba(0,0,0,.95);
+  animation:fx-pop 1.3s ease-out forwards;animation-delay:.1s}
+@keyframes fx-pop{
+  0%{transform:scale(.35) rotate(-11deg);opacity:0}
+  32%{transform:scale(1.2) rotate(3deg);opacity:1}
+  46%{transform:scale(1) rotate(0)}
+  72%{transform:scale(1);opacity:1}
+  100%{transform:scale(1.14);opacity:0}
+}
+/* 効果の系統で色を変える。ライト/ナイトどちらでも読めるよう、影を濃く敷く */
+.fx-cut .fx-line{color:#38bdf8;text-shadow:0 0 22px rgba(56,189,248,.95),0 4px 0 #08375c,0 6px 14px rgba(0,0,0,.7)}
+.fx-revolution .fx-line{color:#fb7185;text-shadow:0 0 22px rgba(244,63,94,.95),0 4px 0 #6b1220,0 6px 14px rgba(0,0,0,.7)}
+.fx-reverse .fx-line{color:#c4b5fd;text-shadow:0 0 22px rgba(167,139,250,.95),0 4px 0 #3b1d80,0 6px 14px rgba(0,0,0,.7)}
+.fx-order .fx-line{color:#6ee7b7;text-shadow:0 0 22px rgba(52,211,153,.95),0 4px 0 #064e3b,0 6px 14px rgba(0,0,0,.7)}
+.fx-foul .fx-line{color:#fcd34d;text-shadow:0 0 22px rgba(251,191,36,.95),0 4px 0 #713f12,0 6px 14px rgba(0,0,0,.7)}
+/* 動きを減らす設定の人には、動かさずそのまま出す（消すのはJS側のタイマー）。
+   animation を短くするだけだと forwards で終端（透明）に飛んで一瞬も見えなくなる */
+@media (prefers-reduced-motion: reduce){
+  .fx-line,.fx-by{animation:none}
+  #flash.flash-on::before{animation:none;background:rgba(0,0,0,.42)}
+}
 .turnline{text-align:center;padding:6px 0;font-size:1rem;font-weight:700}
 .dot{width:8px;height:8px;border-radius:999px;display:inline-block}
 .dot-human{background:#10b981} .dot-cpu{background:#06b6d4} .dot-dummy{background:#a78bfa}
@@ -199,6 +237,9 @@ body .text-\[11px\]{font-size:12.5px}
 </head>
 <body>
 <div id="app" class="min-h-screen"></div>
+<!-- 8切り・革命などを大きく出す場所。**#app の外に置く**のが要点で、
+     中に入れると paint() の描き直しでアニメーションが途中で止まる -->
+<div id="flash" aria-hidden="true"></div>
 <script type="module" src="./app.js"></script>
 </body>
 </html>

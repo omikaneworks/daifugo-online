@@ -131,6 +131,16 @@ export class DaifugoRoom {
     return null;
   }
 
+  // 8切り・革命などを画面に大きく出すための合図。ログの小さい1行だけだと見落とすため。
+  // id は「まだ見せていない効果かどうか」をクライアントが見分けるための通し番号で、
+  // これが無いと部屋に入り直すたびに過去の効果が再生されてしまう
+  setFlash(items, by) {
+    const r = this.room;
+    if (!r || !items || !items.length) return;
+    r.flashSeq = (r.flashSeq || 0) + 1;
+    r.flash = { id: r.flashSeq, by: by || "", items };
+  }
+
   sanitize(forPlayerId) {
     if (!this.room) return null;
     // 自分の手札＋（テストモードなら）手番の人の手札だけ。それ以外は必ず伏せる
@@ -695,6 +705,14 @@ export class DaifugoRoom {
     let cut = false;     // 場を流すか
     let skip = 0;        // 次に飛ばす人数
     let logExtra = "";
+    // 画面に大きく出す用の効果。**ログの文言と必ず同じ場所で積む**（片方だけ足すと、
+    // ログには出るのに大きく出ない／その逆が起きて食い違うため）。
+    // logText を渡すとログ側だけ別の（長い）文言にできる
+    const fx = [];
+    const mark = (label, kind, logText) => {
+      logExtra += `（${logText || label}）`;
+      fx.push({ label, kind });
+    };
 
     // --- 革命判定 ---
     if (!r.revolutionLocked) {
@@ -706,36 +724,36 @@ export class DaifugoRoom {
       if (rules.nanasan && play.kind === "set" && play.rank === 7 && play.count === 3) revolt = true;
       if (rules.omen && play.kind === "set" && play.rank === 6 && play.count === 3) revolt = true;
       if (rules.jokerRevolutionBan && (play.jokers || 0) > 0) revolt = false;
-      if (rules.nuke && play.count >= 6) { revolt = true; r.revolutionLocked = true; logExtra += "（核爆弾）"; }
+      if (rules.nuke && play.count >= 6) { revolt = true; r.revolutionLocked = true; mark("核爆弾", "revolution"); }
       if (revolt) {
         r.revolution = !r.revolution;
-        logExtra += r.revolution ? "（革命！）" : "（革命返し）";
+        mark(r.revolution ? "革命！" : "革命返し", "revolution");
         if (rules.omen && play.kind === "set" && play.rank === 6 && play.count === 3) {
           r.revolutionLocked = true;
-          logExtra += "（オーメン：以降の革命封じ）";
+          mark("オーメン", "revolution", "オーメン：以降の革命封じ");
         }
       }
     }
 
     // --- 場を流す系 ---
-    if (isSandStorm) { cut = true; logExtra += "（砂嵐）"; }
-    if (isSpade3Return) { cut = true; logExtra += "（スペ3返し）"; }
-    if (isSpade2Return) { cut = true; logExtra += "（スペ2返し）"; }
-    if (is33Return) { cut = true; logExtra += "（33返し）"; }
-    if (rules.eightCut && play.kind === "set" && reals.length > 0 && reals.every((c) => c.rank === 8)) { cut = true; logExtra += "（8切り）"; }
-    if (rules.kaidanEightCut && play.kind === "stairs" && play.ranks && play.ranks.includes(8)) { cut = true; logExtra += "（階段8切り）"; }
-    if (rules.ambulance && play.kind === "set" && play.rank === 9 && play.count === 2) { cut = true; logExtra += "（救急車）"; }
-    if (rules.rokurokubi && play.kind === "set" && play.rank === 6 && play.count === 2) { cut = true; logExtra += "（ろくろ首）"; }
+    if (isSandStorm) { cut = true; mark("砂嵐", "cut"); }
+    if (isSpade3Return) { cut = true; mark("スペ3返し", "cut"); }
+    if (isSpade2Return) { cut = true; mark("スペ2返し", "cut"); }
+    if (is33Return) { cut = true; mark("33返し", "cut"); }
+    if (rules.eightCut && play.kind === "set" && reals.length > 0 && reals.every((c) => c.rank === 8)) { cut = true; mark("8切り", "cut"); }
+    if (rules.kaidanEightCut && play.kind === "stairs" && play.ranks && play.ranks.includes(8)) { cut = true; mark("階段8切り", "cut"); }
+    if (rules.ambulance && play.kind === "set" && play.rank === 9 && play.count === 2) { cut = true; mark("救急車", "cut"); }
+    if (rules.rokurokubi && play.kind === "set" && play.rank === 6 && play.count === 2) { cut = true; mark("ろくろ首", "cut"); }
 
     // --- 一時反転系 ---
-    if (rules.elevenBack && play.kind === "set" && play.rank === 11) { r.tempReverse = !r.tempReverse; logExtra += "（11バック）"; }
-    if (rules.sixBack && play.kind === "set" && play.rank === 6) { r.tempReverse = !r.tempReverse; logExtra += "（6戻し）"; }
+    if (rules.elevenBack && play.kind === "set" && play.rank === 11) { r.tempReverse = !r.tempReverse; mark("11バック", "reverse"); }
+    if (rules.sixBack && play.kind === "set" && play.rank === 6) { r.tempReverse = !r.tempReverse; mark("6戻し", "reverse"); }
 
     // --- 順番系 ---
-    if (rules.nineReverse && play.kind === "set" && play.rank === 9) { r.direction *= -1; logExtra += "（9リバース）"; }
-    if (rules.twelveReverse && play.kind === "set" && play.rank === 12) { r.direction *= -1; logExtra += "（12リバース）"; }
-    if (rules.fiveSkip && play.kind === "set" && play.rank === 5) { skip += play.count; logExtra += "（5スキップ）"; }
-    if (rules.thirteenSkip && play.kind === "set" && play.rank === 13) { skip += play.count; logExtra += "（13スキップ）"; }
+    if (rules.nineReverse && play.kind === "set" && play.rank === 9) { r.direction *= -1; mark("9リバース", "order"); }
+    if (rules.twelveReverse && play.kind === "set" && play.rank === 12) { r.direction *= -1; mark("12リバース", "order"); }
+    if (rules.fiveSkip && play.kind === "set" && play.rank === 5) { skip += play.count; mark("5スキップ", "order"); }
+    if (rules.thirteenSkip && play.kind === "set" && play.rank === 13) { skip += play.count; mark("13スキップ", "order"); }
 
     // --- 出した手のログ（上がり処理より先に出す。あとに回すと反則の通知が
     //     この行に上書きされて、画面上は最新1行しか見えないため気付けない） ---
@@ -755,11 +773,15 @@ export class DaifugoRoom {
         me.foulOrder = ++r.foulSeq;
         me.finishOrder = r.players.length; // 仮置き。確定は checkGameEnd()
         r.log.push(`${me.name} は反則上がり！（下位確定）`);
+        fx.push({ label: "反則上がり", kind: "foul" });
       } else {
         me.finishOrder = r.players.filter((p) => p.finished && !p.foul).length;
       }
       if (rules.agariNagashi) cut = true;
     }
+
+    // 効果が付いた一手なら、画面に大きく出す合図を積む（反則上がりまで含めてから呼ぶ）
+    this.setFlash(fx, me.name);
 
     // --- 出た札の履歴 ---
     // 場が流れずに続いている間だけ溜める（clearField() で空になる）。
@@ -890,6 +912,7 @@ export class DaifugoRoom {
         me.foulOrder = ++r.foulSeq;
         me.finishOrder = r.players.length; // 仮置き。確定は checkGameEnd()
         r.log.push(`${me.name} は反則上がり！（下位確定）`);
+        this.setFlash([{ label: "反則上がり", kind: "foul" }], me.name);
       } else {
         me.finishOrder = r.players.filter((p) => p.finished && !p.foul).length;
       }

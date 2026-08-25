@@ -152,7 +152,10 @@ function openSocket(path, first, failMsg, backTo) {
     const d = JSON.parse(evt.data);
     if (d.type === "state") {
       const prevActor = state.room ? actingId() : null;
+      // 入り直した1回目は、部屋に残っている過去の効果を再生しない（番号だけ控える）
+      const firstState = !state.room;
       state.room = d.room;
+      showFlash(d.room.flash, firstState);
       state.error = "";
       if (!state.draftRules) state.draftRules = JSON.parse(JSON.stringify(d.room.rules));
       if (prevActor !== actingId()) state.selected = [];
@@ -178,9 +181,38 @@ function openSocket(path, first, failMsg, backTo) {
   state.ws = ws;
 }
 
+// ---------- 場の効果を大きく出す（8切り・革命など） ----------
+// ログの小さい1行だけだと見落とすので、画面いっぱいにドンと出す。
+// **描画は paint() を通さず、#app の外の要素を直接いじる。** paint() は画面のHTMLを
+// 作り直すので、中に入れると再生中のアニメーションが途切れる
+let flashSeen = 0;      // ここまで見せた効果の番号
+let flashTimer = null;
+function showFlash(flash, skip) {
+  if (!flash || flash.id === flashSeen) return;
+  flashSeen = flash.id;
+  if (skip) return;                       // 入り直した1回目は番号を合わせるだけ
+  const el = document.getElementById("flash");
+  if (!el) return;
+  const kind = (flash.items[0] && flash.items[0].kind) || "cut";
+  el.innerHTML = flash.items.map((it) => `<span class="fx-line">${esc(it.label)}</span>`).join("")
+    + (flash.by ? `<span class="fx-by">${esc(flash.by)}</span>` : "");
+  // 一度クラスを外して実寸を読み、アニメーションを頭から再生させる
+  // （付けっぱなしだと、続けて効果が出たとき2回目が動かない）
+  el.className = "";
+  void el.offsetWidth;
+  el.className = "flash-on fx-" + kind;
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => { el.className = ""; el.innerHTML = ""; }, 1300);
+}
+
 // 部屋との接続を切ってスタート画面へ。詰まったときの共通の脱出口
 function resetToTitle(message) {
   if (state.ws) { try { state.ws.close(); } catch { /* 切れていれば何もしない */ } }
+  // 出しかけの効果を消す（部屋を出たのにスタート画面で「8切り！」が残らないように）
+  flashSeen = 0;
+  clearTimeout(flashTimer);
+  const fl = document.getElementById("flash");
+  if (fl) { fl.className = ""; fl.innerHTML = ""; }
   Object.assign(state, {
     ws: null, room: null, code: "", draftRules: null, selected: [], menu: null,
     showRules: false, openCat: null, testMode: false, showGameRules: false,
