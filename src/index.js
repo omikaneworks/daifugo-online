@@ -1144,9 +1144,15 @@ const LOG_FAIL_BASE_MS = 60 * 1000;
 const LOG_FAIL_MAX_STEP = 6;
 const LOG_FAIL_RESET_MS = 60 * 60 * 1000;
 const EVENTS_MAX = 500;   // 直近この件数だけ残す
+// Durable Object は1つの値が128KBまで。events は全部まとめて1つの値なので、件数だけで
+// 削っていると長い名前・長い合言葉が続いたときに超える。超えると put が失敗し、
+// logEvent は fire-and-forget なので**黙って記録が止まる**ため、バイト数でも削る
+const EVENTS_BYTES_MAX = 100 * 1024;
 const NAMES_MAX = 10;     // 1人あたり、直近この個数の名前だけ残す
 
 const logJsonRes = (o) => new Response(JSON.stringify(o), { headers: { "content-type": "application/json" } });
+// 保存したときのバイト数。日本語は1文字3バイトになるので、文字数で測ると足りない
+const logByteLen = (o) => new TextEncoder().encode(JSON.stringify(o)).length;
 
 // 個人IDは8桁の数字。先頭が0の番号（"00123456"）も正規のIDなので、
 // どこでも数値に変換せず必ず文字列のまま扱うこと（数値にすると桁が落ちて別のIDになる）
@@ -1172,6 +1178,25 @@ export class ActivityLog {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    this.migrated = false;   // 旧形式の台帳を移し終えたか（このインスタンスの間だけ覚える）
+  }
+
+  // 台帳は昔「players」という**1つの値に全員分**を入れていた。Durable Object は
+  // 1つの値が128KBまでなので、その持ち方だと名前の長さ次第で 166〜978人で頭打ちになる。
+  // `issued:{id}` と同じ「1人1キー」に移して天井を無くす。移し終えたら旧キーを消す
+  async ensureMigrated() {
+    if (this.migrated) return;
+    const old = await this.state.storage.get("players");
+    if (old) {
+      for (const [id, rec] of Object.entries(old)) {
+        // 新しい形が既にあればそちらが新しいので触らない
+        if (!(await this.state.storage.get(`player:${id}`))) {
+          await this.state.storage.put(`player:${id}`, rec);
+        }
+      }
+      await this.state.storage.delete("players");
+    }
+    this.migrated = true;
   }
 
   // ---- 総当たり対策：同じ相手が続けて外したら待たせる（UserRegistryと同じ形） ----
@@ -1205,6 +1230,7 @@ export class ActivityLog {
     let body = {};
     try { body = await request.json(); } catch { body = {}; }
 
+    await this.ensureMigrated();
     if (url.pathname === "/record") return this.record(body);
     if (url.pathname === "/api/id/issue") return this.issueId();
     if (url.pathname === "/api/id/profile") return this.profile(body, request);
@@ -1225,8 +1251,7 @@ export class ActivityLog {
     if (!id) return logJsonRes({ ok: false });
     if ((await this.waitSec(key)) > 0) return logJsonRes({ ok: false });
 
-    const players = (await this.state.storage.get("players")) || {};
-    let p = players[id];
+    let p = await this.state.storage.get(`player:${id}`);
     // 台帳にも発行済み一覧にも無ければ知らない番号。「在る／無い」をエラーの形で
     // 区別させないため、空の名前を返す（発行済みなら、まだ一度も遊んでいないだけ）
     if (!p && !(await this.state.storage.get(`issued:${id}`))) {
@@ -1245,8 +1270,7 @@ export class ActivityLog {
         while (p.names.length > NAMES_MAX) p.names.shift();
       }
       p.lastSeenAt = ts;
-      players[id] = p;
-      await this.state.storage.put("players", players);
+      await this.state.storage.put(`player:${id}`, p);
     }
     return logJsonRes({ ok: true, name: (p && p.name) || "" });
   }
@@ -1275,15 +1299,18 @@ export class ActivityLog {
     const code = String(body.code || "").slice(0, 20);
     if (!kind || !playerId) return logJsonRes({ ok: false });
 
-    // パターンA：活動ログに1件追記し、直近500件だけ残す
+    // パターンA：活動ログに1件追記し、直近500件だけ残す。
+    // 件数だけでなくバイト数でも削る（1つの値の上限128KBを超えると put が失敗し、
+    // ここは fire-and-forget なので黙って記録が止まってしまうため）
     const events = (await this.state.storage.get("events")) || [];
     events.push({ ts, kind, name, code, playerId });
     while (events.length > EVENTS_MAX) events.shift();
+    while (events.length > 1 && logByteLen(events) > EVENTS_BYTES_MAX) events.shift();
     await this.state.storage.put("events", events);
 
-    // パターンB：プレイヤー台帳をその場で更新する
-    const players = (await this.state.storage.get("players")) || {};
-    const p = players[playerId] || { firstSeenAt: ts, lastSeenAt: ts, names: [], createCount: 0, joinCount: 0 };
+    // パターンB：プレイヤー台帳をその場で更新する（1人1キー）
+    const p = (await this.state.storage.get(`player:${playerId}`))
+      || { firstSeenAt: ts, lastSeenAt: ts, names: [], createCount: 0, joinCount: 0 };
     p.lastSeenAt = ts;
     // 今の名前。create / join / rename のどの経路でも名前が届くので、遊んでいれば最新化される
     if (name) p.name = name;
@@ -1294,8 +1321,7 @@ export class ActivityLog {
     // rename は「遊んだ回数」ではないので数えない（names への追加と lastSeenAt の更新だけ）
     if (kind === "create") p.createCount = (p.createCount || 0) + 1;
     else if (kind === "join") p.joinCount = (p.joinCount || 0) + 1;
-    players[playerId] = p;
-    await this.state.storage.put("players", players);
+    await this.state.storage.put(`player:${playerId}`, p);
 
     return logJsonRes({ ok: true });
   }
@@ -1317,7 +1343,11 @@ export class ActivityLog {
       await this.clearFail(key);
     }
     const events = ((await this.state.storage.get("events")) || []).slice().reverse();
-    const players = (await this.state.storage.get("players")) || {};
+    // 台帳は1人1キー。画面に返す形は今までどおり { id: レコード } にまとめ直す
+    const players = {};
+    for (const [k, v] of await this.state.storage.list({ prefix: "player:" })) {
+      players[k.slice("player:".length)] = v;
+    }
     return logJsonRes({ ok: true, events, players });
   }
 }
