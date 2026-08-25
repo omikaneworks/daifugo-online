@@ -29,7 +29,14 @@ body.night{
   --pass-bg:#3a424f; --pass-t:#e3e7ed; --pass-b:#4d5666;
 }
 *{-webkit-tap-highlight-color:transparent}
-body{background:var(--bg);color:var(--text);margin:0}
+/* カードを続けて押したときに画面が拡大しないようにする。
+   viewport の maximum-scale は iOS Safari が無視する（アクセシビリティのため）ので、
+   効くのはこちら。manipulation は「ダブルタップ拡大だけをやめる」指定で、
+   指2本のピンチ拡大は今までどおり使える（見えにくい人の手段を奪わない） */
+body{background:var(--bg);color:var(--text);margin:0;touch-action:manipulation}
+/* 素早く押したときに文字が選択されて青くなる・虫めがねが出るのを防ぐ。
+   入力欄と場のログは選べるままにしておく（合言葉をコピーしたいことがある） */
+button,.card,.hand-row{-webkit-user-select:none;user-select:none}
 .panel{background:var(--panel);border:1px solid var(--border)}
 .t-main{color:var(--text)} .t-dim{color:var(--dim)} .t-accent{color:var(--accent)}
 .err{color:var(--err)}
@@ -245,6 +252,12 @@ body .text-xs{font-size:.85rem;line-height:1.3rem}
 body .text-sm{font-size:1rem;line-height:1.45rem}
 body .text-\[10px\]{font-size:12px}
 body .text-\[11px\]{font-size:12.5px}
+
+/* **入力欄の文字は必ず16px以上にすること。** iOS Safari は16px未満の入力欄に
+   フォーカスすると画面を勝手に拡大し、しかも入力後に元の倍率へ戻らない。
+   上の底上げルールや .id-text（.85rem）より強くする必要があるので、
+   ここも body を付けて詳細度で勝たせている */
+body input.inp,body textarea.inp{font-size:16px}
 </style>
 </head>
 <body>
