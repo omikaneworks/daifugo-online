@@ -1207,8 +1207,48 @@ export class ActivityLog {
 
     if (url.pathname === "/record") return this.record(body);
     if (url.pathname === "/api/id/issue") return this.issueId();
+    if (url.pathname === "/api/id/profile") return this.profile(body, request);
     if (url.pathname === "/api/admin/log") return this.adminLog(body, request);
     return new Response("Not found", { status: 404 });
+  }
+
+  // 個人IDに紐づく名前を読む／保存する。管理キーは不要（issueId と同じ性質）。
+  //   { id }        → 読む
+  //   { id, name }  → 保存して返す
+  // 本人確認はしない（番号を知っている人は名乗れる、という今の作りと一貫させる）。
+  // ただし**存在するIDを総当たりで探れる入口**になるので、外したときだけ待たせる。
+  // 正しいIDを引く分にはミスが出ないので、普通に使う人は引っかからない
+  async profile(body, request) {
+    const id = String(body.id || "");
+    const ip = request.headers.get("CF-Connecting-IP") || "local";
+    const key = "profile:" + ip;
+    if (!id) return logJsonRes({ ok: false });
+    if ((await this.waitSec(key)) > 0) return logJsonRes({ ok: false });
+
+    const players = (await this.state.storage.get("players")) || {};
+    let p = players[id];
+    // 台帳にも発行済み一覧にも無ければ知らない番号。「在る／無い」をエラーの形で
+    // 区別させないため、空の名前を返す（発行済みなら、まだ一度も遊んでいないだけ）
+    if (!p && !(await this.state.storage.get(`issued:${id}`))) {
+      await this.addFail(key);
+      return logJsonRes({ ok: true, name: "" });
+    }
+    await this.clearFail(key);
+
+    const name = String(body.name || "").trim().slice(0, 20);
+    if (name && name !== (p && p.name)) {
+      const ts = Date.now();
+      p = p || { firstSeenAt: ts, lastSeenAt: ts, names: [], createCount: 0, joinCount: 0 };
+      p.name = name;
+      if (!p.names.includes(name)) {
+        p.names.push(name);
+        while (p.names.length > NAMES_MAX) p.names.shift();
+      }
+      p.lastSeenAt = ts;
+      players[id] = p;
+      await this.state.storage.put("players", players);
+    }
+    return logJsonRes({ ok: true, name: (p && p.name) || "" });
   }
 
   // 個人IDを発行する。誰でも自分の番号をもらえるべきものなので管理キーは要らない。
@@ -1245,6 +1285,8 @@ export class ActivityLog {
     const players = (await this.state.storage.get("players")) || {};
     const p = players[playerId] || { firstSeenAt: ts, lastSeenAt: ts, names: [], createCount: 0, joinCount: 0 };
     p.lastSeenAt = ts;
+    // 今の名前。create / join / rename のどの経路でも名前が届くので、遊んでいれば最新化される
+    if (name) p.name = name;
     if (name && !p.names.includes(name)) {
       p.names.push(name);
       while (p.names.length > NAMES_MAX) p.names.shift();
@@ -1297,8 +1339,9 @@ export default {
       return env.ROOM.get(id).fetch(request);
     }
 
-    // 個人IDの発行。初めて遊ぶ端末が1回だけ呼ぶ。管理キーは要らない
-    if (url.pathname === "/api/id/issue") {
+    // 個人IDの発行（初めて遊ぶ端末が1回だけ呼ぶ）と、IDに紐づく名前の読み書き。
+    // どちらも管理キーは要らない
+    if (url.pathname === "/api/id/issue" || url.pathname === "/api/id/profile") {
       if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
       return env.LOG.get(env.LOG.idFromName("log")).fetch(request);
     }

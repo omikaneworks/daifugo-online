@@ -27,6 +27,19 @@ const ID_KEY = "daifugo-personal-id";
 const readPersonalId = () => localStorage.getItem(ID_KEY) || "";
 // 見せるときだけ4桁ずつに区切る。コピー・QR・サーバーに送る値は区切り無しのまま
 const formatPersonalId = (id) => (/^\d{8}$/.test(id) ? id.slice(0, 4) + " " + id.slice(4) : id);
+// 名前は「個人IDに紐づくもの」としてサーバーが持つ。localStorage の daifugo-name は手元の控えで、
+// 起動時にサーバーから取り直す。name を渡すと保存もする（部屋の外で改名したとき用）
+async function fetchProfileName(id, name) {
+  try {
+    const r = await fetch("/api/id/profile", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(name ? { id, name } : { id }),
+    });
+    const d = await r.json();
+    if (d.ok && d.name) return String(d.name);
+  } catch { /* 通信できなければ手元の控えのまま使う */ }
+  return "";
+}
 async function issuePersonalId() {
   try {
     const r = await fetch("/api/id/issue", { method: "POST" });
@@ -233,11 +246,15 @@ W.confirmIdPaste = () => {
 W.cancelIdPasteConfirm = () => { state.idPasteConfirm = null; render(); };
 W.applyIdPaste = () => {
   localStorage.setItem(ID_KEY, state.idPasteConfirm);
+  // 別人のIDに切り替える以上、前の名前は持ち越さない。
+  // 消しておけば、開き直したときにサーバーからそのIDの名前が入る
+  localStorage.removeItem("daifugo-name");
   location.reload();
 };
 
-// 名前を変える。部屋に入っていればその場で全員の画面に反映し、
-// いなければ端末に覚えるだけ（次に部屋を作る／参加するときの名前欄に入る）
+// 名前を変える。どちらの経路でもサーバー側の「今の名前」が更新される
+//   部屋にいる  … rename を送る（その場で全員の画面に反映され、台帳も更新される）
+//   部屋にいない … /api/id/profile に保存する（これが無いと他の端末に伝わらない）
 W.confirmRename = () => {
   const el = document.getElementById("rename-input");
   const v = ((el ? el.value : "") || "").trim();
@@ -246,6 +263,7 @@ W.confirmRename = () => {
   state.name = v;
   localStorage.setItem("daifugo-name", v);
   if (state.ws) send({ type: "rename", name: v, asPlayerId: null });
+  else fetchProfileName(state.playerId, v);
   state.error = `名前を「${v}」に変更しました`;
   render();
 };
@@ -624,15 +642,16 @@ function paint() {
       ${state.adminTab === "players" ? `
         <div class="panel rounded-xl p-3 admin-table-wrap">
           <table class="admin-table"><thead><tr>
-            <th>個人ID</th><th>初回</th><th>最終</th><th>使った名前</th><th>作成/参加</th>
+            <th>個人ID</th><th>今の名前</th><th>初回</th><th>最終</th><th>使った名前</th><th>作成/参加</th>
           </tr></thead><tbody>
             ${players.length ? players.map(([pid, p]) => `<tr>
               <td class="id-text-sm">${esc(pid.slice(0, 8))}</td>
+              <td>${esc(p.name || "—")}</td>
               <td>${fmt(p.firstSeenAt)}</td>
               <td>${fmt(p.lastSeenAt)}</td>
               <td>${(p.names || []).map(esc).join("、")}</td>
               <td>${p.createCount || 0} / ${p.joinCount || 0}</td>
-            </tr>`).join("") : `<tr><td colspan="5" class="t-dim text-center py-3">まだ記録がありません</td></tr>`}
+            </tr>`).join("") : `<tr><td colspan="6" class="t-dim text-center py-3">まだ記録がありません</td></tr>`}
           </tbody></table>
         </div>
       ` : `
@@ -866,6 +885,21 @@ async function bootstrap() {
   }
   localStorage.setItem(ID_KEY, state.playerId);
   render();
+  syncNameFromServer(state.playerId);
+}
+
+// 名前はサーバー（個人IDに紐づく）が正。起動を止めないよう待たずに取りに行き、届いたら差し替える。
+// ただし入力中なら触らない —— paint() は画面のHTMLを作り直すので、名前欄・合言葉欄に
+// 打っている最中に render() が走ると入力が消えるため
+function syncNameFromServer(id) {
+  fetchProfileName(id).then((name) => {
+    if (!name || name === state.name) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+    state.name = name;
+    localStorage.setItem("daifugo-name", name);
+    render();
+  });
 }
 
 document.body.classList.toggle("night", state.night);
