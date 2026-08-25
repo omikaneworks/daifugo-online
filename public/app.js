@@ -92,6 +92,8 @@ async function issuePersonalId() {
   return String(Math.floor(Math.random() * 1e8)).padStart(8, "0");
 }
 const effRev = (r) => !!r.revolution !== !!r.tempReverse;
+// カードの強さ。革命・一時反転のときは大小が逆になる（src/index.js と同じ考え方）
+const strength = (rank, rev) => (rev ? -rank : rank);
 // 手札の並びは常に 3→2（Joker は右端）。革命・一時反転で強弱が逆になっても
 // 並べ替えない（同じ札が毎回同じ位置にある方が探しやすいため）
 function sortHand(hand) {
@@ -163,7 +165,7 @@ function actingId() {
   const r = state.room;
   if (!r) return state.playerId;
   if (r.pending) return r.pending.playerId;
-  if (r.status === "exchange" && r.exchangeNeeded && r.exchangeNeeded[0]) return r.exchangeNeeded[0].upperId;
+  if (r.status === "exchange" && r.exchangeNeeded && r.exchangeNeeded[0]) return r.exchangeNeeded[0].playerId;
   if (r.order && r.order.length) return r.order[r.currentTurnIndex];
   return state.playerId;
 }
@@ -503,9 +505,10 @@ const roomLabel = (r) => (r && r.code) || "";
 function nightBtn() {
   return `<button onclick="toggleNight()" class="btn-sub px-3 py-1 rounded-lg text-sm">${state.night ? "☀︎" : "☾"}</button>`;
 }
-function cardFace(card, selected, clickable, small) {
+// tone は "on"（いま出せる＝目立たせる）／"off"（いまは出せない＝薄いグレー）／""（区別なし）
+function cardFace(card, selected, clickable, small, tone) {
   const isJoker = card.suit === "JOKER";
-  const cls = `card ${small ? "small" : ""} ${isJoker ? "card-joker" : ""} ${selected ? "card-sel" : "card-normal"} ${clickable ? "clickable" : ""}`;
+  const cls = `card ${small ? "small" : ""} ${isJoker ? "card-joker" : ""} ${selected ? "card-sel" : "card-normal"} ${clickable ? "clickable" : ""} ${tone ? "card-" + tone : ""}`;
   const oc = clickable ? `onclick="toggleSelect('${encodeURIComponent(JSON.stringify(card))}')"` : "";
   if (isJoker) {
     return `<button ${oc} class="${cls}"><span class="jk-face">🃏</span><span class="jk-txt">JOKER</span></button>`;
@@ -514,10 +517,17 @@ function cardFace(card, selected, clickable, small) {
     <span class="cd-rank ${SUIT_COLOR[card.suit]}">${RANK_LABEL(card.rank)}</span>
     <span class="cd-suit ${SUIT_COLOR[card.suit]}">${SUIT_SYMBOL[card.suit]}</span></button>`;
 }
-// 手札は何枚でも必ず1行。カードを重ねて幅に収める（CSSの .hand-row 参照）
-function handRow(hand) {
-  return `<div class="hand-row">${hand.map((c) =>
-    cardFace(c, state.selected.some((s) => s.id === c.id), true, false)).join("")}</div>`;
+// 手札は何枚でも必ず1行。カードを重ねて幅に収める（CSSの .hand-row 参照）。
+// off に入れたIDは「いまは選べない札」。薄いグレーにして押せなくする。
+// **1枚も off が無いときは何の色分けもしない** —— 全部出せる場面で全部を光らせても
+// ただの飾りになるので、差があるときだけ出せる札を目立たせる
+function handRow(hand, off) {
+  const dim = !!(off && off.size);
+  return `<div class="hand-row">${hand.map((c) => {
+    const sel = state.selected.some((s) => s.id === c.id);
+    const no = !sel && dim && off.has(c.id);
+    return cardFace(c, sel, !no, false, no ? "off" : dim && !sel ? "on" : "");
+  }).join("")}</div>`;
 }
 // 重なり量と文字サイズは、描画後の実際の幅から決める。
 // 枚数が多いほど詰まり、左端に残る帯（＝見える幅）に収まるところまで数字を縮める。
@@ -952,10 +962,40 @@ function paint() {
     };
     const others = r.players.filter((p) => p.id !== state.playerId).sort((a, b) => seatOf(a.id) - seatOf(b.id));
 
-    // 交換フェーズ
+    // 交換フェーズ。差し出す側（下位）→ 返す側（上位）の順に1人ずつ操作する。
+    // 下位も自分の手札を見て自分で選ぶ（何を取られたか分からないまま進まないように）
     if (r.status === "exchange") {
       const task = r.exchangeNeeded[0];
-      const mine = task && (isTest || task.upperId === state.playerId);
+      const mine = !!task && (isTest || task.playerId === state.playerId);
+      const give = !!task && task.role === "give";
+      const to = (task && r.players.find((p) => p.id === task.toId)) || {};
+      const label = give ? "渡す" : "返す";
+      // 選べない札を伏せる。
+      //  ・差し出す側 … 「一番強いところから n 枚」しか渡せない。同じ強さの札が
+      //    並んでいるときだけ、どれを渡すか選べる（2が3枚あるとき等）。
+      //    残り枠が「必ず渡さないといけない札の数」と同じになったら、そこだけに絞る
+      //  ・返す側 … 何を返してもよい。必要な枚数を選び終えたらそれ以上は選べない
+      const off = new Set();
+      if (mine && task) {
+        const st = (c) => (c.suit === "JOKER" ? 999 : strength(c.rank, rev));
+        const picked = (c) => state.selected.some((s) => s.id === c.id);
+        if (give) {
+          const desc = [...hand].sort((a, b) => st(b) - st(a));
+          const border = st(desc[Math.min(task.n, desc.length) - 1]);
+          const slots = task.n - state.selected.length;
+          const forcedLeft = hand.filter((c) => st(c) > border && !picked(c)).length;
+          for (const c of hand) {
+            if (picked(c)) continue;
+            if (slots <= 0) { off.add(c.id); continue; }
+            if (st(c) < border) off.add(c.id);
+            // 残り枠が「必ず渡す札」の数に並んだら、同じ強さの札からはもう選べない
+            else if (st(c) === border && slots <= forcedLeft) off.add(c.id);
+          }
+        } else if (state.selected.length >= task.n) {
+          for (const c of hand) if (!picked(c)) off.add(c.id);
+        }
+      }
+      const ready = mine && state.selected.length === task.n;
       app.innerHTML = `<div class="min-h-screen p-4 flex flex-col">
         <div class="flex justify-between items-center mb-3">
           <span class="flex gap-2 items-center">${menuBtn()}<span class="t-dim text-sm">部屋 ${esc(roomLabel(r))}・カード交換</span></span>
@@ -963,14 +1003,42 @@ function paint() {
             <button onclick="toggleGameRules()" class="btn-sub px-3 py-1 rounded-lg text-xs">ルール</button>${nightBtn()}
           </span></div>
         <div class="panel rounded-xl p-4 mb-3 text-center">
-          <p class="t-main text-sm">${mine ? `${esc(act.name)} は下位に返すカードを <b>${task.n}枚</b> 選んでください` : "他のプレイヤーが交換中…"}</p>
+          ${!task ? `<p class="t-main text-sm">交換の準備中…</p>` : mine ? `
+            <p class="t-main text-sm">${esc(act.name)} は ${esc(to.name || "相手")} に <b>${task.n}枚</b> ${label}</p>
+            <p class="t-dim text-xs mt-1">${give
+              ? "一番強いカードを渡します。同じ強さのカードが複数あるときは、どれを渡すか選べます"
+              : "手札から好きなカードを選べます"}</p>`
+            : `<p class="t-main text-sm">${esc((r.players.find((p) => p.id === task.playerId) || {}).name || "")} が交換中…</p>`}
         </div>
         ${mine ? `<div class="panel p-3 mt-auto">
-          ${handRow(hand)}
+          ${handRow(hand, off)}
           ${state.error ? `<p class="err text-xs mb-2 text-center">${esc(state.error)}</p>` : ""}
-          <button onclick="submitExchange()" class="btn-play w-full py-3 rounded-lg font-bold">${state.selected.length}/${task.n} 枚を渡す</button>
+          <button onclick="submitExchange()" ${ready ? "" : "disabled"} class="btn-play w-full py-3 rounded-lg font-bold">${state.selected.length}/${task.n} 枚を${label}</button>
         </div>` : ""}${gameRulesOverlay()}${menuOverlay()}${idOverlay()}</div>`;
       return;
+    }
+
+    // いま選べる札を割り出す。r.moves はサーバーが並べた「いま出せる組み合わせ」
+    // （カードidの配列の配列）で、手番の人にだけ届く。
+    // **届いていなければ何も伏せない** —— 出せるはずの札を伏せて詰ませる方が害が大きい
+    const selIds = state.selected.map((c) => c.id);
+    const offIds = new Set();
+    let canSubmit = state.selected.length > 0;
+    let noMove = false;
+    if (r.pending) {
+      // 7渡し／10捨ては枚数だけが決まり。必要な枚数を選び終えたら、それ以上は選べない
+      if (r.pending.type !== "bomber" && state.selected.length >= r.pending.count) {
+        for (const c of hand) if (!selIds.includes(c.id)) offIds.add(c.id);
+      }
+    } else if (canAct && Array.isArray(r.moves)) {
+      // いま選んでいる札を含んだまま完成できる手だけを見る。
+      // そこに出てこない札は、これ以上足しても形にならないので伏せる
+      const fits = r.moves.filter((m) => selIds.every((id) => m.includes(id)));
+      const addable = new Set();
+      for (const m of fits) for (const id of m) addable.add(id);
+      for (const c of hand) if (!addable.has(c.id)) offIds.add(c.id);
+      canSubmit = selIds.length > 0 && fits.some((m) => m.length === selIds.length);
+      noMove = r.moves.length === 0;
     }
 
     // 保留アクション（7渡し / 10捨て / Qボンバー）は通常と違う操作なので、
@@ -996,7 +1064,7 @@ function paint() {
         popFloat = `<div class="pop-above">
           <p class="pop-t">${give ? "7渡し" : "10捨て"}</p>
           <p class="pop-d">${esc(pl.name)} が手札から ${r.pending.count}枚 を${lbl}</p>
-          ${mine ? `<button onclick="submitPending()" class="btn-play w-full mt-2 py-2 rounded-lg font-bold">${state.selected.length}/${r.pending.count} 枚を${lbl}</button>`
+          ${mine ? `<button onclick="submitPending()" ${state.selected.length === r.pending.count ? "" : "disabled"} class="btn-play w-full mt-2 py-2 rounded-lg font-bold">${state.selected.length}/${r.pending.count} 枚を${lbl}</button>`
             : waiting}</div>`;
       }
     }
@@ -1029,11 +1097,12 @@ function paint() {
       <div class="panel p-3 panel-bottom">
         ${popFloat}
         ${isTest ? `<p class="t-dim text-xs mb-1 text-center">${esc(act.name)} の手札</p>` : ""}
-        ${handRow(hand)}
+        ${handRow(hand, offIds)}
+        ${noMove ? `<p class="t-dim text-xs mb-2 text-center">出せるカードがありません。パスしてください</p>` : ""}
         ${state.error ? `<p class="err text-xs mb-2 text-center">${esc(state.error)}</p>` : ""}
         ${r.pending ? "" : `<div class="flex gap-2">
           <button onclick="submitPass()" ${!canAct || !r.field ? "disabled" : ""} class="btn-pass rounded-lg font-bold" style="flex:4 1 0%">パス</button>
-          <button onclick="submitPlay()" ${!canAct ? "disabled" : ""} class="btn-play rounded-lg font-bold" style="flex:6 1 0%">出す</button>
+          <button onclick="submitPlay()" ${!canAct || !canSubmit ? "disabled" : ""} class="btn-play rounded-lg font-bold" style="flex:6 1 0%">出す</button>
         </div>`}
       </div>${popModal}${gameRulesOverlay()}${menuOverlay()}${idOverlay()}</div>`;
     return;

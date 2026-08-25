@@ -14,6 +14,9 @@ const CPU_NAMES = ["ハルト", "アオイ", "ソラ", "ナナ", "リク", "ミ�
 
 // 場に残して見せる直近の手の数（room.pile）
 const PILE_MAX = 3;
+// 「いま出せる組み合わせ」の一覧をクライアントへ送るときの上限。
+// 画面で出せない札を伏せるためだけのものなので、多すぎたら諦めて何も伏せない方が安全
+const MOVES_MAX = 400;
 
 const DEFAULT_RULES = buildDefaultRules();
 
@@ -75,6 +78,14 @@ export class DaifugoRoom {
 
   async ensureLoaded() {
     if (!this.room) this.room = (await this.state.storage.get("room")) || null;
+    // 交換キューの持ち方を変えた（{upperId, lowerId, n} → {role, playerId, toId, n}）。
+    // 入れ替えた瞬間に交換フェーズだった部屋は、変換しないと「誰の番か」が分からず
+    // 動かなくなる。旧形式は「下位はもう差し出し済み・上位が返すだけ」の状態なので
+    // そのまま back の1手として引き継ぐ
+    const q = this.room && this.room.exchangeNeeded;
+    if (q && q.length && q[0] && !q[0].playerId && q[0].upperId) {
+      this.room.exchangeNeeded = q.map((t) => ({ role: "back", playerId: t.upperId, toId: t.lowerId, n: t.n }));
+    }
   }
 
   async fetch(request) {
@@ -127,8 +138,10 @@ export class DaifugoRoom {
 
   async persistAndBroadcast() {
     await this.state.storage.put("room", this.room);
+    // 出せる手の洗い出しは全員に同じものを送るので、人数分ではなく1回だけ計算する
+    const moves = this.legalMoves(this.actingId());
     for (const [ws, pid] of this.sessions.entries()) {
-      try { ws.send(JSON.stringify({ type: "state", room: this.sanitize(pid) })); }
+      try { ws.send(JSON.stringify({ type: "state", room: this.sanitize(pid, moves) })); }
       catch { this.sessions.delete(ws); }
     }
   }
@@ -138,7 +151,7 @@ export class DaifugoRoom {
     const r = this.room;
     if (!r) return null;
     if (r.pending) return r.pending.playerId;
-    if (r.status === "exchange" && r.exchangeNeeded && r.exchangeNeeded[0]) return r.exchangeNeeded[0].upperId;
+    if (r.status === "exchange" && r.exchangeNeeded && r.exchangeNeeded[0]) return r.exchangeNeeded[0].playerId;
     if (r.order && r.order.length) return r.order[r.currentTurnIndex];
     return null;
   }
@@ -209,15 +222,21 @@ export class DaifugoRoom {
     r.flash = { id: r.flashSeq, by: by || "", items };
   }
 
-  sanitize(forPlayerId) {
+  sanitize(forPlayerId, moves) {
     if (!this.room) return null;
     // 自分の手札＋（テストモードなら）手番の人の手札だけ。それ以外は必ず伏せる
     const acting = this.room.testMode ? this.actingId() : null;
-    return {
+    const out = {
       ...this.room,
       players: this.room.players.map((p) =>
         p.id === forPlayerId || (acting && p.id === acting) ? p : { ...p, hand: undefined }),
     };
+    // いま出せる組み合わせの一覧。手札を見せている相手にだけ送る（画面で出せない札を
+    // 伏せるため）。**送っていないものは見えない**ので、クライアントは moves が
+    // 届かなければ何も伏せない＝今までどおり全部押せる
+    const actId = this.actingId();
+    if (actId && (actId === forPlayerId || this.room.testMode)) out.moves = moves;
+    return out;
   }
 
   // ロビーから席を1つ空ける。自分で抜けたときと、ロビー中に接続が切れたときの両方で通る
@@ -623,33 +642,54 @@ export class DaifugoRoom {
           continue;
         }
       }
-      // 下位は強い順に自動で差し出す
-      const sorted = sortHand(lower.hand, false);
-      const give = sorted.slice(-n);
-      lower.hand = sorted.slice(0, sorted.length - n);
-      upper.hand = sortHand([...upper.hand, ...give], false);
-      lower.handCount = lower.hand.length; upper.handCount = upper.hand.length;
-      // 上位は自分で選んで返す
-      r.exchangeNeeded.push({ upperId: upper.id, lowerId: lower.id, n });
+      // 「下位が強い札を差し出す」→「上位が好きな札を返す」の2手を、この順に1つずつ処理する。
+      // 昔は下位の分を自動で抜いていたが、**何を取られたのか本人に見えなかった**ので
+      // 下位も自分で選ぶようにした。強さは「一番上から n 枚」に縛られる（弱い札を隠せない）が、
+      // 同じ強さの札が並んでいるとき（2が3枚あるとき等）はどれを渡すか本人が決められる
+      r.exchangeNeeded.push({ role: "give", playerId: lower.id, toId: upper.id, n });
+      r.exchangeNeeded.push({ role: "back", playerId: upper.id, toId: lower.id, n });
     }
     if (r.exchangeNeeded.length > 0) r.status = "exchange";
   }
 
+  // 交換の1手。**必ずキューの先頭（exchangeNeeded[0]）だけを処理する**。
+  // 下位が差し出す前に上位が返すと、返した札をそのまま取り返せてしまうため順番を守る
   submitExchange(playerId, cards) {
     const r = this.room;
     if (r.status !== "exchange") return { ok: false, message: "交換フェーズではありません" };
-    const task = r.exchangeNeeded.find((t) => t.upperId === playerId);
-    if (!task) return { ok: false, message: "あなたの交換ではありません" };
+    const task = r.exchangeNeeded[0];
+    if (!task || task.playerId !== playerId) return { ok: false, message: "あなたの交換ではありません" };
     if (!cards || cards.length !== task.n) return { ok: false, message: `${task.n}枚選んでください` };
-    const upper = r.players.find((p) => p.id === task.upperId);
-    const lower = r.players.find((p) => p.id === task.lowerId);
-    for (const c of cards) if (!upper.hand.some((h) => h.id === c.id)) return { ok: false, message: "手札にないカードです" };
+    const from = r.players.find((p) => p.id === task.playerId);
+    const to = r.players.find((p) => p.id === task.toId);
+    // 相手が居なくなっていたら、この1手は捨てて先へ進める（交換で止まったままにしない）
+    if (!from || !to) {
+      r.exchangeNeeded.shift();
+      if (r.exchangeNeeded.length === 0) { r.status = "playing"; r.log.push("ゲーム開始！"); }
+      return { ok: false, message: "交換の相手がいません" };
+    }
+    const ids = new Set(cards.map((c) => c.id));
+    if (ids.size !== cards.length) return { ok: false, message: "同じカードは選べません" };
+    for (const c of cards) if (!from.hand.some((h) => h.id === c.id)) return { ok: false, message: "手札にないカードです" };
+    // 動かすのは手札にある実物。クライアントから届いた中身はそのまま信じない
+    const give = from.hand.filter((c) => ids.has(c.id));
+    const rest = from.hand.filter((c) => !ids.has(c.id));
 
-    upper.hand = upper.hand.filter((h) => !cards.some((c) => c.id === h.id));
-    lower.hand = sortHand([...lower.hand, ...cards], false);
-    upper.handCount = upper.hand.length; lower.handCount = lower.hand.length;
-    r.exchangeNeeded = r.exchangeNeeded.filter((t) => t.upperId !== playerId);
-    r.log.push(`${upper.name} が ${lower.name} にカードを返しました`);
+    if (task.role === "give") {
+      // 下位が差し出すのは「一番強いところから n 枚」。同じ強さの中でどれを出すかだけ選べる。
+      // 出した中の一番弱い札より強い札が手元に残っていたら、強い札を隠したということ
+      const st = (c) => (c.suit === "JOKER" ? 999 : strength(c.rank, effRev(r)));
+      const weakestGiven = Math.min(...give.map(st));
+      if (rest.some((c) => st(c) > weakestGiven)) return { ok: false, message: "一番強いカードから渡してください" };
+    }
+
+    from.hand = rest;
+    to.hand = sortHand([...to.hand, ...give], false);
+    from.handCount = from.hand.length; to.handCount = to.hand.length;
+    r.exchangeNeeded.shift();
+    r.log.push(task.role === "give"
+      ? `${from.name} が ${to.name} に強いカードを ${task.n}枚 渡しました`
+      : `${from.name} が ${to.name} にカードを ${task.n}枚 返しました`);
 
     if (r.exchangeNeeded.length === 0) { r.status = "playing"; r.log.push("ゲーム開始！"); }
     return { ok: true };
@@ -692,18 +732,34 @@ export class DaifugoRoom {
     return { kind: "stairs", suit: reals[0].suit, startRank: ranks[0] - extra, count: total, ranks: ranks, jokers: jokerCount };
   }
 
-  // ---------- カードを出す ----------
-  applyPlay(playerId, cards) {
+  // この一手で上がったとき、反則上がりになるか。手札がゼロになる場合だけ意味を持つ。
+  // applyPlay() と decideCPUMove() の両方がここを呼ぶ
+  checkFoul(cards, play) {
     const r = this.room;
     const rules = r.rules;
-    if (r.status !== "playing") return { ok: false, message: "ゲーム中ではありません" };
-    if (r.pending) return { ok: false, message: "先に処理を完了してください" };
-    if (r.order[r.currentTurnIndex] !== playerId) return { ok: false, message: "あなたの番ではありません" };
-    if (!cards || cards.length === 0) return { ok: false, message: "カードを選んでください" };
+    const fb = rules.forbidden;
+    const rev = effRev(r);
+    const reals = cards.filter((c) => c.suit !== "JOKER");
+    const has = (rk) => reals.some((c) => c.rank === rk);
+    const willRevolt = rules.revolution && play.kind === "set" && play.count >= rules.revolutionCards;
+    if (fb.joker && cards.some((c) => c.suit === "JOKER")) return true;
+    if (fb.two && !rev && has(15)) return true;
+    if (fb.three && rev && has(3)) return true;
+    if (fb.eight && rules.eightCut && has(8)) return true;
+    if (fb.spade3 && cards.length === 1 && cards[0].suit === "S" && cards[0].rank === 3) return true;
+    if (fb.eleven && rules.elevenBack && has(11)) return true;
+    if (fb.ten && rules.tenDiscard && has(10)) return true;
+    if (fb.seven && rules.sevenGive && has(7)) return true;
+    if (fb.revolutionAgari && willRevolt) return true;
+    return false;
+  }
 
-    const me = r.players.find((p) => p.id === playerId);
-    for (const c of cards) if (!me.hand.some((h) => h.id === c.id)) return { ok: false, message: "手札にないカードです" };
-
+  // 出せるかどうかの判定だけを切り出したもの。**applyPlay() と、CPU・画面用の
+  // legalMoves() が同じここを通る**ので、ルールを足すときはここ1ヶ所で済む。
+  // 手札も場も触らないことがこの関数の約束（触ると出せる手の洗い出しが盤面を壊す）
+  validatePlay(cards) {
+    const r = this.room;
+    const rules = r.rules;
     const play = this.classify(cards, r);
     if (!play) return { ok: false, message: "出せる組み合わせではありません" };
 
@@ -755,23 +811,30 @@ export class DaifugoRoom {
       }
     }
 
+    return { ok: true, play, rev, reals, isSpade3Return, isSpade2Return, is33Return, isSandStorm };
+  }
+
+  // ---------- カードを出す ----------
+  applyPlay(playerId, cards) {
+    const r = this.room;
+    const rules = r.rules;
+    if (r.status !== "playing") return { ok: false, message: "ゲーム中ではありません" };
+    if (r.pending) return { ok: false, message: "先に処理を完了してください" };
+    if (r.order[r.currentTurnIndex] !== playerId) return { ok: false, message: "あなたの番ではありません" };
+    if (!cards || cards.length === 0) return { ok: false, message: "カードを選んでください" };
+
+    const me = r.players.find((p) => p.id === playerId);
+    for (const c of cards) if (!me.hand.some((h) => h.id === c.id)) return { ok: false, message: "手札にないカードです" };
+
+    const v = this.validatePlay(cards);
+    if (!v.ok) return v;
+    const { play, rev, reals, isSpade3Return, isSpade2Return, is33Return, isSandStorm } = v;
+
     // --- 上がり禁止（反則上がり）チェック ---
+    // 判定の中身は checkFoul() に出してある。**CPU が反則を避けるのに同じ判定を使う**ので、
+    // 禁止の条件を足すときはあちらだけ直せば両方に効く
     const newHand = me.hand.filter((c) => !cards.some((s) => s.id === c.id));
-    let foul = false;
-    if (newHand.length === 0) {
-      const fb = rules.forbidden;
-      const has = (rk) => reals.some((c) => c.rank === rk);
-      const willRevolt = rules.revolution && play.kind === "set" && play.count >= rules.revolutionCards;
-      if (fb.joker && cards.some((c) => c.suit === "JOKER")) foul = true;
-      if (fb.two && !rev && has(15)) foul = true;
-      if (fb.three && rev && has(3)) foul = true;
-      if (fb.eight && rules.eightCut && has(8)) foul = true;
-      if (fb.spade3 && cards.length === 1 && cards[0].suit === "S" && cards[0].rank === 3) foul = true;
-      if (fb.eleven && rules.elevenBack && has(11)) foul = true;
-      if (fb.ten && rules.tenDiscard && has(10)) foul = true;
-      if (fb.seven && rules.sevenGive && has(7)) foul = true;
-      if (fb.revolutionAgari && willRevolt) foul = true;
-    }
+    const foul = newHand.length === 0 && this.checkFoul(cards, play);
 
     // ===== ここから確定処理 =====
     me.hand = newHand;
@@ -1119,6 +1182,102 @@ export class DaifugoRoom {
     return true;
   }
 
+  // ---------- いま出せる組み合わせの一覧 ----------
+  // 画面で「出せない札」を薄くして押せなくするために、手番の人へ送る。
+  // 候補を作るのはここだが、**出せるかどうかの判定は必ず validatePlay() に任せる**ので
+  // ルールを足しても（縛り・返し技・革命など）自動で正しくなる。
+  // 戻り値はカードidの配列の配列（例 [["S-3"], ["H-5","D-5"]]）。
+  // **空の配列＝「1つも出せない」**という意味なので、クライアントはパスへ誘導してよい。
+  // 反対に、届いていない（undefined）ときは何も伏せないこと
+  legalMoves(playerId) {
+    const r = this.room;
+    if (!r || r.status !== "playing" || r.pending || !playerId) return undefined;
+    if (!r.order || r.order[r.currentTurnIndex] !== playerId) return undefined;
+    const p = r.players.find((pl) => pl.id === playerId);
+    if (!p || !p.hand || p.finished) return undefined;
+
+    const out = [];
+    const seen = new Set();
+    let full = false;
+    const add = (cs) => {
+      if (full || !cs.length) return;
+      const ids = cs.map((c) => c.id).sort();
+      const key = ids.join(",");
+      if (seen.has(key)) return;
+      seen.add(key);
+      if (!this.validatePlay(cs).ok) return;
+      out.push(ids);
+      // 多すぎて送れないくらいなら、何も伏せない方が安全（画面で詰ませない）
+      if (out.length > MOVES_MAX) full = true;
+    };
+    // ちょうど k 枚の組み合わせを全部作る（階段で Joker に置き換える札を選ぶのに使う）
+    const pick = (arr, k) => {
+      if (k <= 0) return [[]];
+      const res = [];
+      const walk = (i, cur) => {
+        if (cur.length === k) { res.push([...cur]); return; }
+        for (let x = i; x < arr.length; x++) { cur.push(arr[x]); walk(x + 1, cur); cur.pop(); }
+      };
+      walk(0, []);
+      return res;
+    };
+    // 空でない部分集合を全部作る。同ランクは最大4枚・Jokerも数枚なので数は知れている
+    const subsets = (arr) => {
+      const res = [];
+      for (let m = 1; m < (1 << arr.length); m++) {
+        const sub = [];
+        for (let i = 0; i < arr.length; i++) if (m & (1 << i)) sub.push(arr[i]);
+        res.push(sub);
+      }
+      return res;
+    };
+
+    const jokers = p.hand.filter((c) => c.suit === "JOKER");
+    const reals = p.hand.filter((c) => c.suit !== "JOKER");
+    const byRank = new Map();
+    for (const c of reals) {
+      if (!byRank.has(c.rank)) byRank.set(c.rank, []);
+      byRank.get(c.rank).push(c);
+    }
+    const jokerSubs = [[], ...subsets(jokers)];
+    // 同ランク（Joker を混ぜた形も含む）
+    for (const g of byRank.values()) for (const sub of subsets(g)) for (const j of jokerSubs) add([...sub, ...j]);
+    // Joker だけ
+    for (const j of subsets(jokers)) add(j);
+    // 階段。「連番の区間」を端から端まで試し、持っていないランクは Joker で埋める。
+    // **持っているランクをあえて Joker に置き換えた形も作る**こと —— そうしないと
+    // 「3・4・Joker」（Joker を端に付ける形）のような手を取りこぼして、画面で出せる札が
+    // 伏せられてしまう
+    if (r.rules.kaidan) {
+      const TOP = RANKS[RANKS.length - 1];
+      for (const suit of SUITS) {
+        if (full) break;
+        const at = new Map(reals.filter((c) => c.suit === suit).map((c) => [c.rank, c]));
+        if (!at.size) continue;
+        for (let start = RANKS[0]; start <= TOP && !full; start++) {
+          for (let len = r.rules.kaidanMin; start + len - 1 <= TOP && !full; len++) {
+            const got = [];
+            let miss = 0;
+            for (let k = start; k < start + len; k++) {
+              const c = at.get(k);
+              if (c) got.push(c); else miss++;
+            }
+            if (miss > jokers.length) break;   // これ以上伸ばしても Joker が足りない
+            for (const j of jokerSubs) {
+              const swap = j.length - miss;      // 実札を Joker に置き換える枚数
+              if (swap < 0 || swap > got.length) continue;
+              for (const drop of pick(got, swap)) {
+                add([...got.filter((c) => !drop.includes(c)), ...j]);
+              }
+            }
+          }
+        }
+      }
+    }
+    if (full) return undefined;
+    return out;
+  }
+
   // ---------- CPU ----------
   async maybeScheduleCPU() {
     const r = this.room;
@@ -1126,7 +1285,7 @@ export class DaifugoRoom {
     if (r.status === "exchange") {
       const task = r.exchangeNeeded[0];
       if (task) {
-        const p = r.players.find((pl) => pl.id === task.upperId);
+        const p = r.players.find((pl) => pl.id === task.playerId);
         if (p && p.isCPU) { await this.state.storage.setAlarm(Date.now() + 800); return; }
       }
       return;
@@ -1148,10 +1307,12 @@ export class DaifugoRoom {
     if (r.status === "exchange") {
       const task = r.exchangeNeeded[0];
       if (task) {
-        const p = r.players.find((pl) => pl.id === task.upperId);
+        const p = r.players.find((pl) => pl.id === task.playerId);
         if (p && p.isCPU) {
-          const weakest = sortHand(p.hand, effRev(r)).slice(0, task.n);
-          this.submitExchange(p.id, weakest);
+          const sorted = sortHand(p.hand, effRev(r));
+          // 差し出すときは強い方から（ルール上そうするしかない）、返すときは弱い方から
+          const pick = task.role === "give" ? sorted.slice(sorted.length - task.n) : sorted.slice(0, task.n);
+          this.submitExchange(p.id, pick);
         }
       }
       await this.persistAndBroadcast();
@@ -1196,34 +1357,67 @@ export class DaifugoRoom {
     }
     const ranks = [...byRank.keys()].sort((a, b) => strength(a, rev) - strength(b, rev));
 
+    // 出せる手の候補を弱い順に並べる（同ランクの組み合わせだけ。階段・Joker代用はしない）。
+    // 昔は最初に見つかった1つをそのまま出していたが、反則上がりを避けるために
+    // いったん全部集めてから選ぶ形にした
+    const cands = [];
     if (!r.field) {
-      if (ranks.length > 0) return [byRank.get(ranks[0])[0]];
-      if (jokers.length > 0) return [jokers[0]];
-      return null;
-    }
-    const f = r.field;
-    if (f.kind === "set") {
-      for (const rk of ranks) {
-        const g = byRank.get(rk);
-        if (g.length < f.count) continue;
-        if (strength(rk, rev) <= strength(f.rank, rev)) continue;
-        const cand = g.slice(0, f.count);
-        // 縛りに引っかかるものは避ける
-        if (r.suitLockActive && !cand.every((c) => c.suit === r.suitLockActive)) continue;
-        if (r.numberLockActive != null && rk !== r.numberLockActive) continue;
-        return cand;
+      for (const rk of ranks) cands.push([byRank.get(rk)[0]]);
+      if (jokers.length > 0) cands.push([jokers[0]]);
+    } else {
+      const f = r.field;
+      if (f.kind === "set") {
+        for (const rk of ranks) {
+          const g = byRank.get(rk);
+          if (g.length < f.count) continue;
+          if (strength(rk, rev) <= strength(f.rank, rev)) continue;
+          const cand = g.slice(0, f.count);
+          // 縛りに引っかかるものは避ける
+          if (r.suitLockActive && !cand.every((c) => c.suit === r.suitLockActive)) continue;
+          if (r.numberLockActive != null && rk !== r.numberLockActive) continue;
+          cands.push(cand);
+        }
+        if (jokers.length >= f.count) cands.push(jokers.slice(0, f.count));
+      } else if (f.kind === "joker") {
+        if (r.rules.spade3Return && f.count === 1) {
+          const s3 = reals.find((c) => c.suit === "S" && c.rank === 3);
+          if (s3) cands.push([s3]);
+        }
       }
-      if (jokers.length >= f.count) return jokers.slice(0, f.count);
-      return null;
+      // 階段はCPU非対応
     }
-    if (f.kind === "joker") {
-      if (r.rules.spade3Return && f.count === 1) {
-        const s3 = reals.find((c) => c.suit === "S" && c.rank === 3);
-        if (s3) return [s3];
+    if (!cands.length) return null;
+    if (cands.length === 1) return cands[0];
+
+    // 反則上がりを避ける。CPU が反則で最下位に落ちると、人には「勝ちを勝手に
+    // 譲られた」ように見えて興ざめするので、極力させない。
+    //   ① その一手で上がると反則になるものを避ける
+    //   ② 出したあと1枚だけ残り、その1枚では必ず反則になる形も避ける
+    //      （＝2 や 8 を最後まで抱え込まないよう、余裕のあるうちに出しておく）
+    //   ③ 7渡し／10捨てで残り全部を手放す形も、上がれば反則になる
+    const foulOf = (cs) => {
+      const play = this.classify(cs, r);
+      return !!play && this.checkFoul(cs, play);
+    };
+    const penalty = (cs) => {
+      const left = player.hand.filter((c) => !cs.some((x) => x.id === c.id));
+      if (left.length === 0) return foulOf(cs) ? 1000 : 0;
+      const play = this.classify(cs, r);
+      if (play && play.kind === "set" && left.length <= play.count) {
+        const fb = r.rules.forbidden;
+        if (fb.seven && r.rules.sevenGive && play.rank === 7) return 1000;
+        if (fb.ten && r.rules.tenDiscard && play.rank === 10) return 1000;
       }
-      return null;
+      if (left.length === 1 && foulOf(left)) return 100;
+      return 0;
+    };
+    // 同じ点数なら先頭（＝一番弱い手）のまま。今までの打ち方をそのまま残すため
+    let best = cands[0], bestPen = penalty(cands[0]);
+    for (let i = 1; i < cands.length && bestPen > 0; i++) {
+      const pen = penalty(cands[i]);
+      if (pen < bestPen) { best = cands[i]; bestPen = pen; }
     }
-    return null; // 階段はCPU非対応
+    return best;
   }
 }
 

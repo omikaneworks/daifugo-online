@@ -62,6 +62,12 @@ button:disabled{opacity:.3}
 .card-normal{background:var(--card);border-color:var(--card-b)}
 .card-sel{background:var(--sel);border-color:var(--sel-b);transform:translateY(-12px)}
 .card-joker{background:var(--jk);border-color:var(--jk-b)}
+/* いま出せる札／出せない札の色分け。app.js の handRow() が付ける。
+   **差が無い場面（全部出せる・自分の番でない）ではどちらも付かない** ——
+   全部を光らせるとただの飾りになるため。border-color を上書きするので、
+   この2行は .card-normal / .card-joker より後ろに置くこと */
+.card-on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.card-off{opacity:.38;filter:grayscale(1);box-shadow:none}
 .card.clickable:active{transform:scale(.94)}
 .cd-rank{font-weight:700;font-size:1.3rem;line-height:1.1}
 .card.small .cd-rank{font-size:1rem}
