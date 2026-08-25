@@ -1059,7 +1059,11 @@ function paint() {
         }).join("")}
       </div>
       ${isHost ? `<button onclick="rematch()" class="btn-play px-6 py-3 rounded-lg font-bold">もう一度遊ぶ</button>` : `<p class="t-dim text-sm">ホストの操作を待っています…</p>`}
-      <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm mt-3">タイトルに戻る</button>
+      <div class="w-full max-w-sm flex gap-2 mt-3">
+        <button onclick="leaveRoom()" class="btn-sub flex-1 py-2 rounded-lg text-sm">タイトルに戻る</button>
+        ${isHost ? `<button onclick="toggleMenu('disband')" class="btn-sub err flex-1 py-2 rounded-lg text-sm">部屋を解散する</button>` : ""}
+      </div>
+      ${isHost ? `<p class="t-dim text-[11px] mt-2 text-center">「タイトルに戻る」は自分だけが抜けます。部屋は残るので、遊び終わったら解散してください。</p>` : ""}
     </div>${menuOverlay()}${idOverlay()}`;
     return;
   }
