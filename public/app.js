@@ -487,22 +487,19 @@ function idOverlay() {
         maxlength="20" class="inp flex-1 px-3 py-2 rounded-lg" />
       <button onclick="confirmRename()" class="btn-play px-4 rounded-lg font-bold text-sm">変更</button>
     </div>
-    <p class="t-dim text-[11px] mb-4">名前はいつでも変えられます。個人IDは変わらないので、
-    名前を変えても同じ人として扱われます。</p>
 
-    <label class="block t-dim text-sm mb-1">個人ID</label>
-    <p class="t-dim text-xs mb-3">パソコンとスマホなど、複数の端末を同じ人として
-    使いたいときに、ここでIDを合わせられます。</p>
+    <label class="block t-dim text-sm mb-1 mt-4">個人ID</label>
+    <p class="t-dim text-xs mb-3">パソコンとスマホを同じ人として使うための番号です。</p>
     <div class="flex gap-2 mb-3">
       <button onclick="showIdShowMode()" class="btn-sub flex-1 py-2 rounded-lg text-sm ${showMode ? "font-bold" : ""}">このIDを見せる</button>
       <button onclick="showIdPasteMode()" class="btn-sub flex-1 py-2 rounded-lg text-sm ${!showMode ? "font-bold" : ""}">他の端末に合わせる</button>
     </div>
     ${showMode ? `
-      <p class="t-dim text-xs text-center mb-2">別の端末で「他の端末に合わせる」を開き、これを入力してください</p>
+      <p class="t-dim text-xs text-center mb-2">別の端末で「他の端末に合わせる」に入力してください</p>
       <p class="id-text id-big">${esc(formatPersonalId(state.playerId))}</p>
       <button onclick="copyMyId()" class="btn-sub w-full py-2 mt-3 rounded-lg text-sm">IDをコピー</button>
     ` : `
-      <p class="t-dim text-xs text-center mb-2">先ほどの端末で表示したIDを、ここに入力してください</p>
+      <p class="t-dim text-xs text-center mb-2">もう一方の端末に出ている番号を入力してください</p>
       <input id="id-paste-input" placeholder="例：1234 5678" autocomplete="off" spellcheck="false"
         inputmode="numeric" class="inp w-full mb-2 px-3 py-2 rounded-lg text-center id-text" />
       <button onclick="confirmIdPaste()" class="btn-play w-full py-3 rounded-lg font-bold">このIDに合わせる</button>
@@ -589,7 +586,7 @@ function paint() {
           無ければその場で作られ、すでにあれば参加します。名前が空なら「開発者」になります。</p>
         </div>` : ""}
         ${state.error ? `<p class="err mt-4 text-center">${esc(state.error)}</p>` : ""}
-        <button onclick="openIdPanel()" class="id-link">マイページ（${esc(formatPersonalId(state.playerId))}）</button>
+        <button onclick="openIdPanel()" class="id-link">マイページ</button>
       </div></div>${idOverlay()}`;
     return;
   }
