@@ -28,15 +28,18 @@ body.night{
   --red:#c62828; --black:#1c1f24; --err:#f87171;
   --pass-bg:#3a424f; --pass-t:#e3e7ed; --pass-b:#4d5666;
 }
-*{-webkit-tap-highlight-color:transparent}
-/* カードを続けて押したときに画面が拡大しないようにする。
-   viewport の maximum-scale は iOS Safari が無視する（アクセシビリティのため）ので、
-   効くのはこちら。manipulation は「ダブルタップ拡大だけをやめる」指定で、
-   指2本のピンチ拡大は今までどおり使える（見えにくい人の手段を奪わない） */
-body{background:var(--bg);color:var(--text);margin:0;touch-action:manipulation}
+/* ダブルタップで画面が拡大しないようにする。
+   - viewport の maximum-scale は iOS Safari が無視する（アクセシビリティのため）
+   - **touch-action は継承されない。** body だけに付けても、中のボタン・カード・
+     名前は auto のままで拡大してしまう（実際それで直っていなかった）。
+     だから `*` で全部に付ける
+   - manipulation は「ダブルタップ拡大だけをやめる」指定。指2本のピンチ拡大と
+     スクロールは今までどおり使える（見えにくい人の手段を奪わない） */
+*{-webkit-tap-highlight-color:transparent;touch-action:manipulation}
+body{background:var(--bg);color:var(--text);margin:0}
 /* 素早く押したときに文字が選択されて青くなる・虫めがねが出るのを防ぐ。
-   入力欄と場のログは選べるままにしておく（合言葉をコピーしたいことがある） */
-button,.card,.hand-row{-webkit-user-select:none;user-select:none}
+   入力欄と部屋コードは選べるままにしておく（合言葉をコピーしたいことがある） */
+button,.card,.hand-row,.pcard,.logline{-webkit-user-select:none;user-select:none}
 .panel{background:var(--panel);border:1px solid var(--border)}
 .t-main{color:var(--text)} .t-dim{color:var(--dim)} .t-accent{color:var(--accent)}
 .err{color:var(--err)}
