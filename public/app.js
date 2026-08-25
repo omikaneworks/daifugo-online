@@ -893,7 +893,14 @@ async function bootstrap() {
 // 打っている最中に render() が走ると入力が消えるため
 function syncNameFromServer(id) {
   fetchProfileName(id).then((name) => {
-    if (!name || name === state.name) return;
+    // サーバーがまだ名前を知らない番号（発行したて）。手元に控えがあるなら預けておく。
+    // これが無いと、名前を持っているのに一度も遊んでいない端末のIDに合わせても
+    // 引き継ぐものが無い（名前がサーバーに届くのは create/join/rename のときだけのため）
+    if (!name) {
+      if (state.name) fetchProfileName(id, state.name);
+      return;
+    }
+    if (name === state.name) return;
     const ae = document.activeElement;
     if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
     state.name = name;
