@@ -160,7 +160,19 @@ function openSocket(path, first, failMsg, backTo) {
       else if (d.room.status === "finished") state.screen = "finished";
       else state.screen = "lobby";
     } else if (d.type === "disbanded") { resetToTitle("部屋が解散されました"); return; }
-    else if (d.type === "error") state.error = d.message;
+    else if (d.type === "error") {
+      state.error = d.message;
+      // 部屋に入れないまま返ってきたエラー（合言葉が使用中・部屋が無い・満員・開始済み）。
+      // サーバーは接続を閉じないので、放っておくと「接続中…」の画面に留まって理由が伝わらない。
+      // onclose と同じくスタート画面へ戻す（メッセージ自体が「別の言葉にするか、参加するを
+      // 試して」＝スタート画面での行動を促している）
+      if (!state.room) {
+        // 先に参照を外す。そうしないと下の onclose が failMsg で理由を上書きしてしまう
+        state.ws = null;
+        try { ws.close(); } catch { /* 既に閉じていれば何もしない */ }
+        state.screen = "home";
+      }
+    }
     render();
   };
   state.ws = ws;
@@ -678,7 +690,9 @@ function paint() {
   if (!r) {
     app.innerHTML = `<div class="min-h-screen flex flex-col items-center justify-center gap-3">
       ${state.code ? `<span class="t-dim text-sm">部屋コード</span><div class="roomcode">${esc(state.code)}</div>` : ""}
-      <span class="t-dim">接続中…</span>
+      ${state.error
+        ? `<p class="err text-center">${esc(state.error)}</p>`
+        : `<span class="t-dim">接続中…</span>`}
       <button onclick="leaveRoom()" class="btn-sub px-6 py-2 rounded-lg text-sm mt-2">タイトルに戻る</button>
     </div>`;
     return;
