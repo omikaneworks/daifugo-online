@@ -12,6 +12,20 @@ const START_SUIT = { diamond3: "D", spade3: "S", heart3: "H", club3: "C" };
 // CPU の名前候補（参加時に未使用のものからランダムに選ぶ）
 const CPU_NAMES = ["ハルト", "アオイ", "ソラ", "ナナ", "リク", "ミカ", "ケンタ", "ユウキ", "サクラ", "ツバサ"];
 
+// CPU の性格。**画面には出さない**（sanitize で落とす）。打ち方の重みが変わるだけで、
+// 相手からは「打ち筋の癖」としてしか分からない。表示用の文言を持たないのはそのため。
+//   save … 強い札を温存したい度合い     dump … 一度に多く捌きたい度合い
+//   shape … ペア・3枚組を崩したくない   cut  … 8切りで場を取りに行きたい
+//   hold … 惜しい場面で見送りたい       noise … 打ち方のぶれ幅
+const CPU_STYLES = ["balanced", "careful", "aggressive", "dumper", "moody"];
+const CPU_STYLE_W = {
+  balanced:   { save: 1.0, dump: 1.0, shape: 1.0, cut: 1.0, hold: 1.0, noise: 0.2 },
+  careful:    { save: 2.2, dump: 0.6, shape: 1.8, cut: 0.8, hold: 2.2, noise: 0.1 },
+  aggressive: { save: 0.3, dump: 1.2, shape: 0.5, cut: 2.0, hold: 0.3, noise: 0.2 },
+  dumper:     { save: 0.7, dump: 2.6, shape: 0.2, cut: 1.0, hold: 0.4, noise: 0.2 },
+  moody:      { save: 1.0, dump: 1.0, shape: 1.0, cut: 1.0, hold: 1.0, noise: 0.9 },
+};
+
 // 場に残して見せる直近の手の数（room.pile）
 const PILE_MAX = 3;
 // 「いま出せる組み合わせ」の一覧をクライアントへ送るときの上限。
@@ -226,10 +240,14 @@ export class DaifugoRoom {
     if (!this.room) return null;
     // 自分の手札＋（テストモードなら）手番の人の手札だけ。それ以外は必ず伏せる
     const acting = this.room.testMode ? this.actingId() : null;
+    // CPU の性格は誰にも送らない。**画面側で隠すのではなく、そもそも送らない**
+    // （手札のマスクと同じ考え方。送っていないものは見えない）
     const out = {
       ...this.room,
-      players: this.room.players.map((p) =>
-        p.id === forPlayerId || (acting && p.id === acting) ? p : { ...p, hand: undefined }),
+      players: this.room.players.map((p) => {
+        const { style, ...rest } = p;
+        return p.id === forPlayerId || (acting && p.id === acting) ? rest : { ...rest, hand: undefined };
+      }),
     };
     // いま出せる組み合わせの一覧。手札を見せている相手にだけ送る（画面で出せない札を
     // 伏せるため）。**送っていないものは見えない**ので、クライアントは moves が
@@ -448,7 +466,12 @@ export class DaifugoRoom {
       const used = new Set(r.players.map((p) => p.name));
       const free = CPU_NAMES.filter((nm) => !used.has(nm));
       const name = free.length ? free[Math.floor(Math.random() * free.length)] : `CPU ${n}`;
-      r.players.push({ id: `cpu-${n}-${Date.now()}`, name, isCPU: true, hand: [], handCount: 0, finished: false, finishOrder: null });
+      // 性格も名前と同じ考え方で、まだ部屋に居ないものから選ぶ（同じ癖ばかりが並ばないように）
+      const usedStyles = new Set(r.players.filter((p) => p.isCPU).map((p) => p.style));
+      const freeStyles = CPU_STYLES.filter((st) => !usedStyles.has(st));
+      const pool = freeStyles.length ? freeStyles : CPU_STYLES;
+      const style = pool[Math.floor(Math.random() * pool.length)];
+      r.players.push({ id: `cpu-${n}-${Date.now()}`, name, style, isCPU: true, hand: [], handCount: 0, finished: false, finishOrder: null });
       r.log.push(`${name} が参加しました`);
       await this.persistAndBroadcast();
       return;
@@ -1318,9 +1341,10 @@ export class DaifugoRoom {
       if (task) {
         const p = r.players.find((pl) => pl.id === task.playerId);
         if (p && p.isCPU) {
+          // 差し出すときは強い方から（ルール上そうするしかない）。
+          // 返すときは手放してよい札から＝単騎の弱い札（ペアは崩さない）
           const sorted = sortHand(p.hand, effRev(r));
-          // 差し出すときは強い方から（ルール上そうするしかない）、返すときは弱い方から
-          const pick = task.role === "give" ? sorted.slice(sorted.length - task.n) : sorted.slice(0, task.n);
+          const pick = task.role === "give" ? sorted.slice(sorted.length - task.n) : this.cpuThrowaway(p, task.n);
           this.submitExchange(p.id, pick);
         }
       }
@@ -1335,10 +1359,9 @@ export class DaifugoRoom {
       const p = r.players.find((pl) => pl.id === r.pending.playerId);
       if (!p || !p.isCPU) return;
       if (r.pending.type === "give" || r.pending.type === "discard") {
-        const weakest = sortHand(p.hand, effRev(r)).slice(0, r.pending.count);
-        this.resolvePending(p.id, { cards: weakest });
+        this.resolvePending(p.id, { cards: this.cpuThrowaway(p, r.pending.count) });
       } else if (r.pending.type === "bomber") {
-        this.resolvePending(p.id, { rank: 15 });
+        this.resolvePending(p.id, { rank: this.cpuBomberRank(p) });
       }
       await this.persistAndBroadcast();
       await this.maybeScheduleCPU();
@@ -1347,11 +1370,12 @@ export class DaifugoRoom {
 
     const cur = r.players.find((p) => p.id === r.order[r.currentTurnIndex]);
     if (!cur || !cur.isCPU) return;
+    // **null は「見送る」という意思表示**（出せる手が無いときも null）。まずそのとおりに動く
     const cards = this.decideCPUMove(cur);
-    let res = cards ? this.applyPlay(cur.id, cards) : { ok: false };
-    // **CPU が打てなかったときは必ず何かさせる。** 昔は applyPlay の結果を見ずに
-    // 捨てていたので、思考が出せない札を選ぶと手番が回らないまま対戦が止まった
-    // （実際、色縛り中にそうなっていた）。出せる手の一覧から拾い直し、それも無ければパスする
+    let res = cards ? this.applyPlay(cur.id, cards) : this.applyPass(cur.id);
+    // **打てなかったときは必ず何かさせる。** 昔は applyPlay の結果を見ずに捨てていたので、
+    // 思考が出せない札を選ぶと手番が回らないまま対戦が止まった（実際、色縛り中にそうなっていた）。
+    // 場が空でパスを断られたときもここに来る
     if (!res.ok) {
       const mv = this.legalMoves(cur.id);
       if (mv && mv.length) {
@@ -1365,7 +1389,67 @@ export class DaifugoRoom {
     await this.maybeScheduleCPU();
   }
 
-  decideCPUMove(player) {
+  // 札の強さを 0〜13 に均す。3が0・2が12・Joker が13。革命中は向きが逆になる。
+  // 「どれくらい惜しい札か」を測るのに使う
+  cardPower(c, rev) {
+    if (c.suit === "JOKER") return 13;
+    return rev ? 15 - c.rank : c.rank - 3;
+  }
+  // 場に出ている手の強さ。場が空なら -1
+  fieldPower(rev) {
+    const f = this.room.field;
+    if (!f) return -1;
+    if (f.kind === "joker") return 13;
+    const rk = f.kind === "stairs" ? f.startRank : f.rank;
+    return rev ? 15 - rk : rk - 3;
+  }
+
+  // 反則上がりになりそうな手の減点。0 なら心配なし。
+  //   1000 … その一手で上がると反則／7渡し・10捨てで残り全部を手放す形
+  //    100 … 出したあと1枚だけ残り、その1枚では必ず反則になる
+  cpuFoulPenalty(cards, left) {
+    const r = this.room;
+    const foulOf = (x) => {
+      const play = this.classify(x, r);
+      return !!play && this.checkFoul(x, play);
+    };
+    if (left.length === 0) return foulOf(cards) ? 1000 : 0;
+    const play = this.classify(cards, r);
+    if (play && play.kind === "set" && left.length <= play.count) {
+      const fb = r.rules.forbidden;
+      if (fb.seven && r.rules.sevenGive && play.rank === 7) return 1000;
+      if (fb.ten && r.rules.tenDiscard && play.rank === 10) return 1000;
+    }
+    if (left.length === 1 && foulOf(left)) return 100;
+    return 0;
+  }
+
+  // 手放してよい札を弱い順に選ぶ（7渡し・10捨て・カード交換で返す札）。
+  // **ペア・3枚組は崩さない** —— 単騎の弱い札から先に手放す
+  cpuThrowaway(player, count) {
+    const rev = effRev(this.room);
+    const cnt = new Map();
+    for (const c of player.hand) if (c.suit !== "JOKER") cnt.set(c.rank, (cnt.get(c.rank) || 0) + 1);
+    const group = (c) => (c.suit === "JOKER" ? 9 : cnt.get(c.rank) || 1);
+    return [...player.hand].sort((x, y) => {
+      if (group(x) !== group(y)) return group(x) - group(y);              // 単騎から
+      return this.cardPower(x, rev) - this.cardPower(y, rev);             // 弱い方から
+    }).slice(0, count);
+  }
+
+  // Qボンバーで宣言する数字。**自分が持っていないランクのうち一番強いもの**。
+  // 昔は常に 2 を宣言していて、自分の2まで一緒に捨てていた
+  cpuBomberRank(player) {
+    const rev = effRev(this.room);
+    const mine = new Set(player.hand.filter((c) => c.suit !== "JOKER").map((c) => c.rank));
+    const free = RANKS.filter((rk) => !mine.has(rk));
+    const pool = free.length ? free : RANKS;
+    return pool.reduce((best, rk) => (strength(rk, rev) > strength(best, rev) ? rk : best), pool[0]);
+  }
+
+  // 昔からの単純な候補作り（同ランクの組み合わせだけ）。
+  // **legalMoves() が上限に当たって諦めたときの受け皿として残してある。消さないこと**
+  simpleCPUCandidates(player) {
     const r = this.room;
     const rev = effRev(r);
     const reals = player.hand.filter((c) => c.suit !== "JOKER");
@@ -1375,71 +1459,99 @@ export class DaifugoRoom {
       if (!byRank.has(c.rank)) byRank.set(c.rank, []);
       byRank.get(c.rank).push(c);
     }
-    const ranks = [...byRank.keys()].sort((a, b) => strength(a, rev) - strength(b, rev));
-
-    // 出せる手の候補を弱い順に並べる（同ランクの組み合わせだけ。階段・Joker代用はしない）。
-    // 昔は最初に見つかった1つをそのまま出していたが、反則上がりを避けるために
-    // いったん全部集めてから選ぶ形にした
-    let cands = [];
+    const ranks = [...byRank.keys()].sort((x, y) => strength(x, rev) - strength(y, rev));
+    const cands = [];
     if (!r.field) {
       for (const rk of ranks) cands.push([byRank.get(rk)[0]]);
       if (jokers.length > 0) cands.push([jokers[0]]);
-    } else {
-      const f = r.field;
-      if (f.kind === "set") {
-        for (const rk of ranks) {
-          const g = byRank.get(rk);
-          if (g.length < f.count) continue;
-          if (strength(rk, rev) <= strength(f.rank, rev)) continue;
-          const cand = g.slice(0, f.count);
-          // 縛りに引っかかるものは避ける
-          if (r.suitLockActive && !cand.every((c) => c.suit === r.suitLockActive)) continue;
-          if (r.numberLockActive != null && rk !== r.numberLockActive) continue;
-          cands.push(cand);
-        }
-        if (jokers.length >= f.count) cands.push(jokers.slice(0, f.count));
-      } else if (f.kind === "joker") {
-        if (r.rules.spade3Return && f.count === 1) {
-          const s3 = reals.find((c) => c.suit === "S" && c.rank === 3);
-          if (s3) cands.push([s3]);
-        }
+    } else if (r.field.kind === "set") {
+      for (const rk of ranks) {
+        const g = byRank.get(rk);
+        if (g.length >= r.field.count) cands.push(g.slice(0, r.field.count));
       }
-      // 階段はCPU非対応
+      if (jokers.length >= r.field.count) cands.push(jokers.slice(0, r.field.count));
+    } else if (r.field.kind === "joker" && r.rules.spade3Return && r.field.count === 1) {
+      const s3 = reals.find((c) => c.suit === "S" && c.rank === 3);
+      if (s3) cands.push([s3]);
     }
-    // **候補は必ず validatePlay に通す。** ここを自前の条件だけで済ませていたため、
-    // 色縛り（colorLock）を見落として「出せない札を出そうとして手番が止まる」不具合があった。
-    // ルールを足したときも、ここを通していれば CPU が勝手に反則手を選ばない
-    cands = cands.filter((c) => this.validatePlay(c).ok);
-    if (!cands.length) return null;
-    if (cands.length === 1) return cands[0];
+    return cands;
+  }
 
-    // 反則上がりを避ける。CPU が反則で最下位に落ちると、人には「勝ちを勝手に
-    // 譲られた」ように見えて興ざめするので、極力させない。
-    //   ① その一手で上がると反則になるものを避ける
-    //   ② 出したあと1枚だけ残り、その1枚では必ず反則になる形も避ける
-    //      （＝2 や 8 を最後まで抱え込まないよう、余裕のあるうちに出しておく）
-    //   ③ 7渡し／10捨てで残り全部を手放す形も、上がれば反則になる
-    const foulOf = (cs) => {
-      const play = this.classify(cs, r);
-      return !!play && this.checkFoul(cs, play);
-    };
-    const penalty = (cs) => {
+  // その手番でどう打つかを決める。**null を返したら「パスする」という意思表示**
+  // （出せる手が無いときも null。alarm() はどちらもパスとして扱う）
+  decideCPUMove(player) {
+    const r = this.room;
+    const rev = effRev(r);
+    const w = CPU_STYLE_W[player.style] || CPU_STYLE_W.balanced;
+
+    // 出せる手は legalMoves() から取る。**これで階段も Joker 代用も使えるようになる**
+    // （昔は同ランクの組み合わせしか作っていなかった）。縛りや返し技も込みで検証済み
+    let cands = null;
+    const ids = this.legalMoves(player.id);
+    if (ids) {
+      const byId = new Map(player.hand.map((c) => [c.id, c]));
+      cands = ids.map((m) => m.map((x) => byId.get(x)).filter(Boolean)).filter((cs) => cs.length);
+    } else {
+      // 一覧が多すぎて諦めたとき。自前の候補に落とす（必ず validatePlay を通す）
+      cands = this.simpleCPUCandidates(player).filter((cs) => this.validatePlay(cs).ok);
+    }
+    if (!cands.length) return null;
+
+    const pw = (c) => this.cardPower(c, rev);
+    const handSize = player.hand.length;
+    const rivals = r.players.filter((p) => p.id !== player.id && !p.finished);
+    const rivalMin = rivals.length ? Math.min(...rivals.map((p) => p.handCount || 0)) : 99;
+    const danger = rivalMin <= 2;   // 誰かが上がりそう。惜しんでいる場合ではない
+
+    // いま持っている同ランクの枚数（ペアを崩したか見るのに使う）
+    const own = new Map();
+    for (const c of player.hand) if (c.suit !== "JOKER") own.set(c.rank, (own.get(c.rank) || 0) + 1);
+
+    const score = (cs) => {
       const left = player.hand.filter((c) => !cs.some((x) => x.id === c.id));
-      if (left.length === 0) return foulOf(cs) ? 1000 : 0;
-      const play = this.classify(cs, r);
-      if (play && play.kind === "set" && left.length <= play.count) {
-        const fb = r.rules.forbidden;
-        if (fb.seven && r.rules.sevenGive && play.rank === 7) return 1000;
-        if (fb.ten && r.rules.tenDiscard && play.rank === 10) return 1000;
+      const pen = this.cpuFoulPenalty(cs, left);
+      // 上がれるなら上がる。ただし反則になるなら全力で避ける
+      if (left.length === 0) return pen ? -1000 : 1000;
+      let s = -pen;
+      // 強い札は取っておく／一度に多く捌けるほど良い
+      s -= cs.reduce((n, c) => n + pw(c), 0) * 0.8 * w.save;
+      s += cs.length * 4 * w.dump * (danger ? 1.5 : 1);
+      // ペア・3枚組を部分的に崩したら引く（崩した残りが弱くなるため）
+      const used = new Map();
+      for (const c of cs) if (c.suit !== "JOKER") used.set(c.rank, (used.get(c.rank) || 0) + 1);
+      for (const [rk, n] of used) {
+        const have = own.get(rk) || 0;
+        if (n < have) s -= (have - n) * 4 * w.shape;
       }
-      if (left.length === 1 && foulOf(left)) return 100;
-      return 0;
+      // 8切りは場を流して親を取り返せる。誰かが上がりそうなときほど価値が高い
+      if (r.rules.eightCut && cs.some((c) => c.rank === 8)) {
+        s += (r.field ? 6 : 2) * w.cut * (danger ? 2 : 1);
+      }
+      return s + (Math.random() - 0.5) * 10 * w.noise;
     };
-    // 同じ点数なら先頭（＝一番弱い手）のまま。今までの打ち方をそのまま残すため
-    let best = cands[0], bestPen = penalty(cands[0]);
-    for (let i = 1; i < cands.length && bestPen > 0; i++) {
-      const pen = penalty(cands[i]);
-      if (pen < bestPen) { best = cands[i]; bestPen = pen; }
+
+    let best = cands[0], bestScore = score(cands[0]);
+    for (let i = 1; i < cands.length; i++) {
+      const sc = score(cands[i]);
+      if (sc > bestScore) { best = cands[i]; bestScore = sc; }
+    }
+
+    // 見送るかどうか。**安い場に強い札を切らない**ための判断。
+    // 場が空のときはパスできないので、必ず何か出す
+    if (r.field) {
+      const spend = Math.max(...best.map(pw));
+      // 場より3段以上強い札を使わされるなら「もったいない」と考える。
+      // どこから惜しむかは性格次第（慎重はすぐ見送り、攻めっ気はほとんど見送らない）
+      let hold = (spend - this.fieldPower(rev) - 3) * 1.5 * w.hold - 3;
+      // 相手が上がりそうなら惜しんでいる場合ではない。残り1枚ならほぼ必ず止めに行く
+      if (danger) hold -= 10 + (rivalMin <= 1 ? 15 : 0);
+      if (handSize <= 3) hold -= 8;        // 自分も終盤なら出して上がりたい
+      if (bestScore >= 900) hold -= 1000;  // 上がれる手は絶対に見送らない
+      // **反則札の処分を惜しんで引っ込めない。** 残り少ない手札に「最後に出すと反則になる札」
+      // を抱えているとき、せっかくそれを出しに行った手を見送ると、いつまでも処分できない
+      if (handSize <= 4 && player.hand.some((c) => this.cpuFoulPenalty([c], []) > 0)) hold -= 1000;
+      hold += (Math.random() - 0.5) * 6 * w.noise;
+      if (hold > 0) return null;
     }
     return best;
   }
