@@ -454,8 +454,34 @@ W.setRule = (key, group, value) => {
   else state.draftRules[key] = value;
   render();
 };
+// ---- 長押しでルールの説明を出す ----
+// ボタンには名前しか書かないので、説明は長押しで下の一行に出す。
+// **render() を呼ばずに、その一行だけを直に書き換える** —— paint() は画面のHTMLを
+// 作り直すので、押している最中に走ると指の下のボタンが消えてしまう（#flash と同じ考え方）。
+// 出した説明は消さずに残す。読み終わる前に消えると意味がないので、次に長押しするまで出したまま
+const RULE_TIP_HINT = "ルールを長押しすると説明が出ます";
+const RULE_BY_KEY = new Map();
+for (const cat of RULE_CATEGORIES) for (const r of cat.rules) RULE_BY_KEY.set((r.group || "") + ":" + r.key, r);
+let holdTimer = null, holdFired = false;
+W.ruleHold = (key, group) => {
+  clearTimeout(holdTimer);
+  holdFired = false;
+  holdTimer = setTimeout(() => {
+    const rule = RULE_BY_KEY.get((group || "") + ":" + key);
+    const el = document.getElementById("rule-tip");
+    if (!rule || !el) return;
+    holdFired = true;   // 指を離したときの click を1回だけ無視する
+    el.textContent = rule.desc ? `${rule.label}：${rule.desc}` : `${rule.label}`;
+    el.classList.add("rule-tip-on");
+  }, 400);
+};
+W.ruleHoldEnd = () => clearTimeout(holdTimer);
+// 長押しが成立した直後の click は「押した」ではないので捨てる
+const heldJustNow = () => { if (!holdFired) return false; holdFired = false; return true; };
+
 // 選択式のルールを開く／閉じる（開けるのは1つだけ。もう一度押すと閉じる）
-W.openRule = (key) => { state.openRule = state.openRule === key ? null : key; render(); };
+W.toggleRuleBtn = (key, group, value) => { if (heldJustNow()) return; W.setRule(key, group, value); };
+W.openRule = (key) => { if (heldJustNow()) return; state.openRule = state.openRule === key ? null : key; render(); };
 // 選択肢を選ぶ。値は文字列で届くので、数字のものだけ数値に戻す
 // （"2" → 2、"diamond3" → "diamond3"）。選んだら閉じる
 W.pickRule = (key, group, raw) => {
@@ -578,14 +604,18 @@ function rulesSummary(rules) {
 // 同じ作りにして見た目を揃えている。**まずは 1.基本設定 だけ**この形にして試している
 // （どのカテゴリをこの形にするかは BUTTON_CATS で決める）
 const BUTTON_CATS = new Set(["basic"]);
+// 長押しを拾うための属性。指でもマウスでも同じように効かせる。
+// oncontextmenu を止めないと、長押しでブラウザのメニューが出て操作が奪われる
+const holdAttrs = (key, g) => `ontouchstart="ruleHold('${key}','${g}')" ontouchend="ruleHoldEnd()" ontouchmove="ruleHoldEnd()"
+  onmousedown="ruleHold('${key}','${g}')" onmouseup="ruleHoldEnd()" onmouseleave="ruleHoldEnd()" oncontextmenu="return false"`;
 function ruleButton(rule, rules, editable) {
   const val = rule.group === "forbidden" ? rules.forbidden[rule.key] : rules[rule.key];
   const g = rule.group || "";
-  return `<button ${editable ? "" : "disabled"} onclick="setRule('${rule.key}','${g}', ${val ? "false" : "true"})"
+  return `<button ${editable ? "" : "disabled"} ${holdAttrs(rule.key, g)}
+    onclick="toggleRuleBtn('${rule.key}','${g}', ${val ? "false" : "true"})"
     class="btn-sub rule-btn ${val ? "rule-btn-on" : ""} rounded-lg">
     ${val ? '<span class="rule-btn-check">✓</span>' : ""}
     <span class="rule-btn-name">${rule.label}</span>
-    ${rule.desc ? `<span class="rule-btn-desc">${rule.desc}</span>` : ""}
   </button>`;
 }
 // 選択式のルール（枚数・開始プレイヤーなど）。押すとその場に選択肢が開く。
@@ -597,13 +627,15 @@ function ruleSelectButton(rule, rules, editable) {
   const now = opt ? opt.l : "";
   const g = rule.group || "";
   const open = editable && state.openRule === rule.key;
-  const head = `<span class="rule-btn-name">${rule.label}<span class="rule-btn-val">${esc(now)}${editable ? (open ? " ▲" : " ▼") : ""}</span></span>
-    ${rule.desc ? `<span class="rule-btn-desc">${rule.desc}</span>` : ""}`;
+  const head = `<span class="rule-btn-name">${rule.label}</span>
+    <span class="rule-btn-val">${esc(now)}${editable ? (open ? " ▲" : " ▼") : ""}</span>`;
   if (!open) {
-    return `<button ${editable ? "" : "disabled"} onclick="openRule('${rule.key}')" class="btn-sub rule-btn rounded-lg">${head}</button>`;
+    return `<button ${editable ? "" : "disabled"} ${holdAttrs(rule.key, g)}
+      onclick="openRule('${rule.key}')" class="btn-sub rule-btn rounded-lg">${head}</button>`;
   }
   return `<div class="btn-sub rule-btn rule-btn-open rounded-lg">
-    <button onclick="openRule('${rule.key}')" class="rule-open-head">${head}</button>
+    <button onclick="openRule('${rule.key}')" class="rule-open-head">${head}
+      ${rule.desc ? `<span class="rule-btn-desc">${rule.desc}</span>` : ""}</button>
     <div class="rule-opts">${rule.options.map((o) => `
       <button onclick="pickRule('${rule.key}','${g}','${o.v}')" class="rule-opt ${String(val) === String(o.v) ? "rule-opt-on" : ""}">${o.l}</button>`).join("")}
     </div></div>`;
@@ -792,7 +824,8 @@ function rulesPanel(editable) {
                 // 選択式は押すと2列ぶんに広がるので、途中にあると並びが動いて落ち着かない
                 [...cat.rules.filter((r) => r.type !== "select"), ...cat.rules.filter((r) => r.type === "select")]
                   .map((r) => (r.type === "select" ? ruleSelectButton(r, rules, editable) : ruleButton(r, rules, editable)))
-                  .join("")}</div>`
+                  .join("")}</div>
+               <p id="rule-tip" class="rule-tip">${RULE_TIP_HINT}</p>`
             : cat.rules.map((r) => ruleRow(r, rules, editable)).join("")}
         </div>` : ""}
       </div>`;

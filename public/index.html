@@ -225,7 +225,9 @@ button:disabled{opacity:.3}
    プリセットのボタン（.preset）と同じ見た目に揃えてある。
    **disabled でも薄くしないこと** —— 対戦中の「ルール」画面は閲覧専用なので、
    ボタン全体が opacity:.3 になると何が ON か読めなくなる */
-.rule-btn{position:relative;text-align:left;padding:8px 18px 8px 9px;min-height:56px}
+/* 長押しで説明を出すので、iOS の長押しメニュー（テキスト選択の吹き出し）を止める。
+   -webkit-touch-callout を切らないと、長押しした瞬間にそちらが出て操作を持っていかれる */
+.rule-btn{position:relative;text-align:left;padding:7px 18px 7px 9px;min-height:0;-webkit-touch-callout:none}
 .rule-btn-on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);background:var(--panel)}
 .rule-btn-name{display:block;font-weight:700;font-size:.85rem;line-height:1.25}
 .rule-btn-on .rule-btn-name{color:var(--accent)}
@@ -240,6 +242,11 @@ button:disabled{opacity:.3}
 .rule-opt{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;
   padding:7px 11px;font-size:.8rem;font-weight:600}
 .rule-opt-on{border-color:var(--accent);color:var(--accent);box-shadow:0 0 0 1px var(--accent);background:var(--panel)}
+/* 長押しで出す説明。**高さを先に確保しておく** —— 出たり消えたりで下の中身が
+   動くと、読もうとした瞬間に位置がずれる。何も押していない間は使い方を出しておく */
+.rule-tip{min-height:2.6em;margin-top:8px;padding:6px 8px;border-radius:8px;background:var(--panel2);
+  font-size:.72rem;line-height:1.4;color:var(--dim)}
+.rule-tip-on{color:var(--text);background:var(--panel);box-shadow:0 0 0 1px var(--accent)}
 .rule-row{display:flex;align-items:flex-start;gap:8px;padding:6px 0}
 .rule-check{margin-top:3px;accent-color:var(--accent);width:16px;height:16px;flex:0 0 auto}
 .rule-label{display:block;font-size:.93rem;color:var(--text)}
