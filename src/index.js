@@ -1154,22 +1154,31 @@ export class DaifugoRoom {
     const newClasses = {};
     for (const p of r.players) newClasses[p.id] = rankTitle(p.finishOrder, total);
 
-    // 都落ち
+    // 都落ち。**階級だけを入れ替える**（着順そのものは動かさない）。
+    // 前回の大富豪を階級の並びの一番下へ回し、その下にいた人を1つずつ繰り上げる。
+    // ここで「大貧民」を上書きするだけだと、**元の大貧民と2人になって富豪が消える**
     r.demotedPlayerId = null;
     if (r.rules.miyakoOchi && r.previousDaifugoId) {
       const prev = r.players.find((p) => p.id === r.previousDaifugoId);
       if (prev && prev.finishOrder !== 1) {
         r.demotedPlayerId = prev.id;
-        newClasses[prev.id] = "大貧民";
+        const line = [...r.players].sort((x, y) => x.finishOrder - y.finishOrder)
+          .filter((p) => p.id !== prev.id);
+        line.push(prev);
+        line.forEach((p, i) => { newClasses[p.id] = rankTitle(i + 1, total); });
         r.log.push(`${prev.name} は都落ち！`);
       }
     }
-    // 下剋上
+    // 下剋上。**これはこういうルール**（着順がそっくり裏返る）なので直さないこと。
+    // 前回の大貧民が1位を取ると、1位が大貧民・最下位が大富豪になる。
+    // 都落ちより後に効き、階級を全部上書きするので、都落ちの印は取り消す
+    // （そうしないと結果発表で「都落ち」と出ている人が大富豪になって見える）
     if (r.rules.gekokujo && r.classes) {
       const winner = r.players.find((p) => p.finishOrder === 1);
       if (winner && r.classes[winner.id] === "大貧民") {
         r.log.push("下剋上！ 全員の階級が逆転します");
         for (const p of r.players) newClasses[p.id] = rankTitle(total - p.finishOrder + 1, total);
+        r.demotedPlayerId = null;
       }
     }
     const winner = r.players.find((p) => p.finishOrder === 1);
@@ -1339,8 +1348,19 @@ export class DaifugoRoom {
     const cur = r.players.find((p) => p.id === r.order[r.currentTurnIndex]);
     if (!cur || !cur.isCPU) return;
     const cards = this.decideCPUMove(cur);
-    if (cards) this.applyPlay(cur.id, cards);
-    else this.applyPass(cur.id);
+    let res = cards ? this.applyPlay(cur.id, cards) : { ok: false };
+    // **CPU が打てなかったときは必ず何かさせる。** 昔は applyPlay の結果を見ずに
+    // 捨てていたので、思考が出せない札を選ぶと手番が回らないまま対戦が止まった
+    // （実際、色縛り中にそうなっていた）。出せる手の一覧から拾い直し、それも無ければパスする
+    if (!res.ok) {
+      const mv = this.legalMoves(cur.id);
+      if (mv && mv.length) {
+        const byId = new Map(cur.hand.map((c) => [c.id, c]));
+        res = this.applyPlay(cur.id, mv[0].map((id) => byId.get(id)));
+      }
+      if (!res.ok) res = this.applyPass(cur.id);
+      if (!res.ok) r.log.push(`${cur.name} の手が決まりませんでした`);
+    }
     await this.persistAndBroadcast();
     await this.maybeScheduleCPU();
   }
@@ -1360,7 +1380,7 @@ export class DaifugoRoom {
     // 出せる手の候補を弱い順に並べる（同ランクの組み合わせだけ。階段・Joker代用はしない）。
     // 昔は最初に見つかった1つをそのまま出していたが、反則上がりを避けるために
     // いったん全部集めてから選ぶ形にした
-    const cands = [];
+    let cands = [];
     if (!r.field) {
       for (const rk of ranks) cands.push([byRank.get(rk)[0]]);
       if (jokers.length > 0) cands.push([jokers[0]]);
@@ -1386,6 +1406,10 @@ export class DaifugoRoom {
       }
       // 階段はCPU非対応
     }
+    // **候補は必ず validatePlay に通す。** ここを自前の条件だけで済ませていたため、
+    // 色縛り（colorLock）を見落として「出せない札を出そうとして手番が止まる」不具合があった。
+    // ルールを足したときも、ここを通していれば CPU が勝手に反則手を選ばない
+    cands = cands.filter((c) => this.validatePlay(c).ok);
     if (!cands.length) return null;
     if (cands.length === 1) return cands[0];
 
