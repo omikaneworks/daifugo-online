@@ -787,8 +787,12 @@ function rulesPanel(editable) {
         ${open ? `<div class="cat-body">
           ${cat.note ? `<p class="t-dim text-[11px] mb-2">${cat.note}</p>` : ""}
           ${BUTTON_CATS.has(cat.id)
-            ? `<div class="grid grid-cols-2 gap-2">${cat.rules.map((r) => r.type === "select"
-                ? ruleSelectButton(r, rules, editable) : ruleButton(r, rules, editable)).join("")}</div>`
+            ? `<div class="grid grid-cols-2 gap-2">${
+                // ON/OFF のルールを先に、選択式（枚数など）はまとめて下に置く。
+                // 選択式は押すと2列ぶんに広がるので、途中にあると並びが動いて落ち着かない
+                [...cat.rules.filter((r) => r.type !== "select"), ...cat.rules.filter((r) => r.type === "select")]
+                  .map((r) => (r.type === "select" ? ruleSelectButton(r, rules, editable) : ruleButton(r, rules, editable)))
+                  .join("")}</div>`
             : cat.rules.map((r) => ruleRow(r, rules, editable)).join("")}
         </div>` : ""}
       </div>`;
