@@ -183,25 +183,8 @@ export const PRESETS = [
       tenDiscard: true, twelveBomber: true, thirteenSkip: true, exchange: "normal",
       forbidden: { two: true, eight: true, joker: true, eleven: true, ten: true, seven: true } },
   },
-  {
-    id: "chaos", label: "全部入り", desc: "確認できたルールをほぼ全部ON。法令集モード",
-    apply: (() => {
-      const all = {};
-      const fb = {};
-      for (const cat of RULE_CATEGORIES) {
-        for (const rule of cat.rules) {
-          if (rule.type === "bool") {
-            if (rule.group === "forbidden") fb[rule.key] = true;
-            else all[rule.key] = true;
-          }
-        }
-      }
-      all.jokerCount = 2;
-      all.exchange = "normal";
-      all.startCard = "diamond3";
-      all.jokerRevolutionBan = false; // 全部入りでも代用は活かす
-      all.forbidden = fb;
-      return all;
-    })(),
-  },
 ];
+
+// かつて「全部入り（法令集モード）」というプリセットがあったが、ヨコさんの判断で外した（8/26）。
+// 一つ一つのルールは残っているので、必要ならルール設定で個別に入れられる。
+// 戻したくなったら git show a566377:public/rules.js
