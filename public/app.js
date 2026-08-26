@@ -119,6 +119,8 @@ const state = {
   night: localStorage.getItem("daifugo-night") === "1",
   screen: "home", room: null, error: "", selected: [], ws: null,
   showRules: false, openCat: null, draftRules: null,
+  // 選択式のルール（枚数など）は、押すとその場に選択肢が開く。開いているキーを1つだけ持つ
+  openRule: null,
   testMode: false, showGameRules: false, menu: null, code: "",
   // マイページ。null="閉じている"・"show"="IDを見せる面"・"paste"="他の端末に合わせる面"
   idPanel: null, idPasteConfirm: null,
@@ -452,6 +454,14 @@ W.setRule = (key, group, value) => {
   else state.draftRules[key] = value;
   render();
 };
+// 選択式のルールを開く／閉じる（開けるのは1つだけ。もう一度押すと閉じる）
+W.openRule = (key) => { state.openRule = state.openRule === key ? null : key; render(); };
+// 選択肢を選ぶ。値は文字列で届くので、数字のものだけ数値に戻す
+// （"2" → 2、"diamond3" → "diamond3"）。選んだら閉じる
+W.pickRule = (key, group, raw) => {
+  state.openRule = null;
+  W.setRule(key, group, raw === String(Number(raw)) ? Number(raw) : raw);
+};
 W.applyPreset = (id) => {
   const p = allPresets().find((x) => x.id === id);
   if (!p) return;
@@ -577,6 +587,26 @@ function ruleButton(rule, rules, editable) {
     <span class="rule-btn-name">${rule.label}</span>
     ${rule.desc ? `<span class="rule-btn-desc">${rule.desc}</span>` : ""}
   </button>`;
+}
+// 選択式のルール（枚数・開始プレイヤーなど）。押すとその場に選択肢が開く。
+// 閉じているときは <button>、開いているときは中に選択肢の <button> を並べるので <div>
+// （ボタンの中にボタンは置けない）。開いた札は2列ぶんの幅を使う
+function ruleSelectButton(rule, rules, editable) {
+  const val = rules[rule.key];
+  const opt = rule.options.find((o) => String(o.v) === String(val));
+  const now = opt ? opt.l : "";
+  const g = rule.group || "";
+  const open = editable && state.openRule === rule.key;
+  const head = `<span class="rule-btn-name">${rule.label}<span class="rule-btn-val">${esc(now)}${editable ? (open ? " ▲" : " ▼") : ""}</span></span>
+    ${rule.desc ? `<span class="rule-btn-desc">${rule.desc}</span>` : ""}`;
+  if (!open) {
+    return `<button ${editable ? "" : "disabled"} onclick="openRule('${rule.key}')" class="btn-sub rule-btn rounded-lg">${head}</button>`;
+  }
+  return `<div class="btn-sub rule-btn rule-btn-open rounded-lg">
+    <button onclick="openRule('${rule.key}')" class="rule-open-head">${head}</button>
+    <div class="rule-opts">${rule.options.map((o) => `
+      <button onclick="pickRule('${rule.key}','${g}','${o.v}')" class="rule-opt ${String(val) === String(o.v) ? "rule-opt-on" : ""}">${o.l}</button>`).join("")}
+    </div></div>`;
 }
 function ruleRow(rule, rules, editable) {
   const val = rule.group === "forbidden" ? rules.forbidden[rule.key] : rules[rule.key];
@@ -757,9 +787,8 @@ function rulesPanel(editable) {
         ${open ? `<div class="cat-body">
           ${cat.note ? `<p class="t-dim text-[11px] mb-2">${cat.note}</p>` : ""}
           ${BUTTON_CATS.has(cat.id)
-            ? `<div class="grid grid-cols-2 gap-2 mb-1">${cat.rules.filter((r) => r.type === "bool")
-                .map((r) => ruleButton(r, rules, editable)).join("")}</div>
-               ${cat.rules.filter((r) => r.type !== "bool").map((r) => ruleRow(r, rules, editable)).join("")}`
+            ? `<div class="grid grid-cols-2 gap-2">${cat.rules.map((r) => r.type === "select"
+                ? ruleSelectButton(r, rules, editable) : ruleButton(r, rules, editable)).join("")}</div>`
             : cat.rules.map((r) => ruleRow(r, rules, editable)).join("")}
         </div>` : ""}
       </div>`;
