@@ -221,6 +221,17 @@ button:disabled{opacity:.3}
 .cat{border-top:1px solid var(--border)}
 .cat-head{width:100%;display:flex;justify-content:space-between;align-items:center;padding:11px 2px;font-size:.95rem;font-weight:600;color:var(--text)}
 .cat-body{padding:2px 2px 10px}
+/* ルールを「説明を中に入れたボタン」で出す形（いまは 1.基本設定 だけ）。
+   プリセットのボタン（.preset）と同じ見た目に揃えてある。
+   **disabled でも薄くしないこと** —— 対戦中の「ルール」画面は閲覧専用なので、
+   ボタン全体が opacity:.3 になると何が ON か読めなくなる */
+.rule-btn{position:relative;text-align:left;padding:8px 18px 8px 9px;min-height:56px}
+.rule-btn-on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);background:var(--panel)}
+.rule-btn-name{display:block;font-weight:700;font-size:.85rem;line-height:1.25}
+.rule-btn-on .rule-btn-name{color:var(--accent)}
+.rule-btn-desc{display:block;font-size:.7rem;color:var(--dim);line-height:1.35;margin-top:3px}
+.rule-btn-check{position:absolute;top:5px;right:6px;color:var(--accent);font-weight:700;font-size:.8rem}
+.rule-btn:disabled{opacity:1;cursor:default}
 .rule-row{display:flex;align-items:flex-start;gap:8px;padding:6px 0}
 .rule-check{margin-top:3px;accent-color:var(--accent);width:16px;height:16px;flex:0 0 auto}
 .rule-label{display:block;font-size:.93rem;color:var(--text)}

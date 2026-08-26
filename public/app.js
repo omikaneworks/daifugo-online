@@ -564,6 +564,20 @@ function rulesSummary(rules) {
   }
   return `${n}項目ON`;
 }
+// ON/OFF のルールを「説明を中に入れたボタン」で出す。プリセットのボタン（.preset）と
+// 同じ作りにして見た目を揃えている。**まずは 1.基本設定 だけ**この形にして試している
+// （どのカテゴリをこの形にするかは BUTTON_CATS で決める）
+const BUTTON_CATS = new Set(["basic"]);
+function ruleButton(rule, rules, editable) {
+  const val = rule.group === "forbidden" ? rules.forbidden[rule.key] : rules[rule.key];
+  const g = rule.group || "";
+  return `<button ${editable ? "" : "disabled"} onclick="setRule('${rule.key}','${g}', ${val ? "false" : "true"})"
+    class="btn-sub rule-btn ${val ? "rule-btn-on" : ""} rounded-lg">
+    ${val ? '<span class="rule-btn-check">✓</span>' : ""}
+    <span class="rule-btn-name">${rule.label}</span>
+    ${rule.desc ? `<span class="rule-btn-desc">${rule.desc}</span>` : ""}
+  </button>`;
+}
 function ruleRow(rule, rules, editable) {
   const val = rule.group === "forbidden" ? rules.forbidden[rule.key] : rules[rule.key];
   const dis = editable ? "" : "disabled";
@@ -742,7 +756,11 @@ function rulesPanel(editable) {
         </button>
         ${open ? `<div class="cat-body">
           ${cat.note ? `<p class="t-dim text-[11px] mb-2">${cat.note}</p>` : ""}
-          ${cat.rules.map((r) => ruleRow(r, rules, editable)).join("")}
+          ${BUTTON_CATS.has(cat.id)
+            ? `<div class="grid grid-cols-2 gap-2 mb-1">${cat.rules.filter((r) => r.type === "bool")
+                .map((r) => ruleButton(r, rules, editable)).join("")}</div>
+               ${cat.rules.filter((r) => r.type !== "bool").map((r) => ruleRow(r, rules, editable)).join("")}`
+            : cat.rules.map((r) => ruleRow(r, rules, editable)).join("")}
         </div>` : ""}
       </div>`;
     }).join("")}
