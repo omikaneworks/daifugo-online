@@ -17,6 +17,8 @@
   --red:#dc2626; --black:#1c1f24; --err:#dc2626;
   /* パスボタン（出すボタンと見分けが付くよう、地の色を持たせる） */
   --pass-bg:#dfe3ea; --pass-t:#39404d; --pass-b:#c2c8d2;
+  /* 上がった席。地と文字を入れ替えた濃いグレー（パスの薄いグレーと必ず変える） */
+  --done-bg:#4b5563; --done-t:#f3f4f6;
 }
 body.night{
   --bg:#14161a; --panel:#1e2127; --panel2:#262a31; --border:#363b44;
@@ -27,6 +29,8 @@ body.night{
   --jk:#e6dcf7; --jk-b:#8b5cf6; --jk-t:#5b21b6;
   --red:#c62828; --black:#1c1f24; --err:#f87171;
   --pass-bg:#3a424f; --pass-t:#e3e7ed; --pass-b:#4d5666;
+  /* ナイトでは地が暗いので、反転は「明るいグレー地＋暗い文字」になる */
+  --done-bg:#aeb4bc; --done-t:#14161a;
 }
 /* ダブルタップで画面が拡大しないようにする。
    - viewport の maximum-scale は iOS Safari が無視する（アクセシビリティのため）
@@ -105,12 +109,16 @@ button:disabled{opacity:.3}
 .pname{font-size:.95rem;font-weight:500;color:var(--text)}
 .tag-cpu{font-size:.72rem;color:#0891b2;margin-left:3px}
 .tag-dummy{font-size:.72rem;color:#7c3aed;margin-left:3px}
-/* あがった席・パスした席・前回の階級（誰が抜けたか一目で分かるように） */
-.pcard.done{border-color:#f59e0b;box-shadow:0 0 0 1px #f59e0b}
-.pcard.passed{opacity:.5}
-.pdone{font-size:.82rem;font-weight:800;color:#f59e0b}
+/* あがった席・パスした席・前回の階級（誰が抜けたか一目で分かるように）。
+   **枠や色数で飾らず、地と文字の色だけで区別する。** 上がり＝グレー反転、
+   パス＝それとは別の薄いグレー（薄くして読みにくくしない） */
+.pcard.done{background:var(--done-bg);border-color:var(--done-bg)}
+.pcard.done .pname,.pcard.done .tag-cpu,.pcard.done .tag-dummy{color:var(--done-t)}
+.pdone{font-size:.82rem;font-weight:800;color:var(--done-t)}
+.pcard.passed{background:var(--pass-bg);border-color:var(--pass-b)}
+.ppass{color:var(--pass-t);font-weight:800;margin-left:5px}
 .pcls{margin:1px 0 2px}
-.chip-pass{background:var(--panel2);color:var(--dim);font-weight:700}
+.chip-pass{background:var(--pass-bg);color:var(--pass-t);border-color:var(--pass-b);font-weight:700}
 .field{flex:1;display:flex;align-items:center;justify-content:center;background:var(--field);
   border:1px solid var(--field-b);border-radius:16px;margin:6px 12px;min-height:102px;padding:8px}
 .field-empty{color:var(--field-t);font-size:.95rem}

@@ -209,7 +209,20 @@ function openSocket(path, first, failMsg, backTo) {
       if (!state.draftRules) state.draftRules = JSON.parse(JSON.stringify(d.room.rules));
       if (prevActor !== actingId()) state.selected = [];
       if (d.room.status === "playing" || d.room.status === "exchange") state.screen = "game";
-      else if (d.room.status === "finished") state.screen = "finished";
+      else if (d.room.status === "finished") {
+        // 最後の一手の演出（「あがり！ N位」）と結果発表が重なって読めないので、
+        // 出し切ってから切り替える。席が無い人は待たせても見るものが無いのですぐ出す
+        const seated = d.room.players.some((p) => p.id === state.playerId);
+        const left = seated ? flashLeft() : 0;
+        if (left > 0) {
+          state.screen = "game";
+          clearTimeout(finishTimer);
+          finishTimer = setTimeout(() => {
+            finishTimer = null;
+            if (state.room && state.room.status === "finished") { state.screen = "finished"; render(); }
+          }, left + 120);
+        } else state.screen = "finished";
+      }
       else state.screen = "lobby";
     } else if (d.type === "disbanded") { resetToTitle("部屋が解散されました"); return; }
     else if (d.type === "error") {
@@ -236,6 +249,10 @@ function openSocket(path, first, failMsg, backTo) {
 // 作り直すので、中に入れると再生中のアニメーションが途切れる
 let flashSeen = 0;      // ここまで見せた効果の番号
 let flashTimer = null;
+const FLASH_MS = 1300;  // CSS の fx-pop / fx-veil と同じ長さ
+let flashUntil = 0;     // 再生が終わる時刻。結果発表への切り替えを待たせるのに使う
+let finishTimer = null;
+const flashLeft = () => Math.max(0, flashUntil - Date.now());
 function showFlash(flash, skip) {
   if (!flash || flash.id === flashSeen) return;
   flashSeen = flash.id;
@@ -251,7 +268,8 @@ function showFlash(flash, skip) {
   void el.offsetWidth;
   el.className = "flash-on fx-" + kind;
   clearTimeout(flashTimer);
-  flashTimer = setTimeout(() => { el.className = ""; el.innerHTML = ""; }, 1300);
+  flashUntil = Date.now() + FLASH_MS;
+  flashTimer = setTimeout(() => { el.className = ""; el.innerHTML = ""; }, FLASH_MS);
 }
 
 // 部屋との接続を切ってスタート画面へ。詰まったときの共通の脱出口
@@ -260,6 +278,9 @@ function resetToTitle(message) {
   // 出しかけの効果を消す（部屋を出たのにスタート画面で「8切り！」が残らないように）
   flashSeen = 0;
   clearTimeout(flashTimer);
+  clearTimeout(finishTimer);
+  finishTimer = null;
+  flashUntil = 0;
   const fl = document.getElementById("flash");
   if (fl) { fl.className = ""; fl.innerHTML = ""; }
   Object.assign(state, {
@@ -1146,7 +1167,7 @@ function paint() {
         <div class="pname">${esc(p.name)}${p.isCPU ? '<span class="tag-cpu">CPU</span>' : ""}${p.isDummy ? '<span class="tag-dummy">手動</span>' : ""}</div>
         ${cls ? `<div class="pcls" title="前回のゲームでの階級"><span class="px-1.5 rounded-full text-[10px] font-bold ${badgeColor(cls)}">${cls}</span></div>` : ""}
         ${p.finished ? `<div class="pdone">${p.finishOrder}位 あがり</div>`
-          : `<div class="t-dim text-xs">残${p.handCount}枚${passed ? "・パス" : ""}</div>`}
+          : `<div class="t-dim text-xs">残${p.handCount}枚${passed ? '<span class="ppass">パス</span>' : ""}</div>`}
       </div>`;
       }).join("")}</div>
       <div class="field ${rev ? "rev" : ""}">${fieldDisplay(r)}</div>
