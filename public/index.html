@@ -105,6 +105,12 @@ button:disabled{opacity:.3}
 .pname{font-size:.95rem;font-weight:500;color:var(--text)}
 .tag-cpu{font-size:.72rem;color:#0891b2;margin-left:3px}
 .tag-dummy{font-size:.72rem;color:#7c3aed;margin-left:3px}
+/* あがった席・パスした席・前回の階級（誰が抜けたか一目で分かるように） */
+.pcard.done{border-color:#f59e0b;box-shadow:0 0 0 1px #f59e0b}
+.pcard.passed{opacity:.5}
+.pdone{font-size:.82rem;font-weight:800;color:#f59e0b}
+.pcls{margin:1px 0 2px}
+.chip-pass{background:var(--panel2);color:var(--dim);font-weight:700}
 .field{flex:1;display:flex;align-items:center;justify-content:center;background:var(--field);
   border:1px solid var(--field-b);border-radius:16px;margin:6px 12px;min-height:102px;padding:8px}
 .field-empty{color:var(--field-t);font-size:.95rem}
@@ -170,6 +176,7 @@ button:disabled{opacity:.3}
 .fx-revolution .fx-line{color:#fb7185;text-shadow:0 0 22px rgba(244,63,94,.95),0 4px 0 #6b1220,0 6px 14px rgba(0,0,0,.7)}
 .fx-reverse .fx-line{color:#c4b5fd;text-shadow:0 0 22px rgba(167,139,250,.95),0 4px 0 #3b1d80,0 6px 14px rgba(0,0,0,.7)}
 .fx-order .fx-line{color:#6ee7b7;text-shadow:0 0 22px rgba(52,211,153,.95),0 4px 0 #064e3b,0 6px 14px rgba(0,0,0,.7)}
+.fx-agari .fx-line{color:#fff7d1;text-shadow:0 0 24px rgba(250,204,21,.95),0 4px 0 #92400e,0 6px 14px rgba(0,0,0,.7)}
 .fx-foul .fx-line{color:#fcd34d;text-shadow:0 0 22px rgba(251,191,36,.95),0 4px 0 #713f12,0 6px 14px rgba(0,0,0,.7)}
 /* 動きを減らす設定の人には、動かさずそのまま出す（消すのはJS側のタイマー）。
    animation を短くするだけだと forwards で終端（透明）に飛んで一瞬も見えなくなる */

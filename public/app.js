@@ -1135,15 +1135,24 @@ function paint() {
         ${r.numberLockActive != null ? `<span class="chip chip-lock" title="この数字しか出せません">${RANK_LABEL(r.numberLockActive)} のみ（数縛り）</span>` : ""}
         <span class="chip" title="手番が回る向き。9リバース・12リバースで反転します">${
           r.direction === 1 ? "↻ 順回り" : "↺ 逆回り"}</span>
+        ${r.classes && r.classes[me.id] ? `<span class="px-2 py-1 rounded-full text-[11px] font-bold ${badgeColor(r.classes[me.id])}" title="前回のゲームでのあなたの階級">前回 ${r.classes[me.id]}</span>` : ""}
+        ${!me.finished && r.field && r.rules.passRestriction && (r.passedPlayers || []).includes(me.id) ? '<span class="chip chip-pass" title="場が流れるまで出せません">パス済み</span>' : ""}
       </div>
-      <div class="players">${others.map((p) => `<div class="pcard ${r.order[r.currentTurnIndex] === p.id ? "turn" : ""}">
+      <div class="players">${others.map((p) => {
+        // 前回の階級（r.classes）・パス済み（場が流れるまで打てない）・あがった順位を1枚に収める
+        const cls = (r.classes && r.classes[p.id]) || "";
+        const passed = !p.finished && r.field && r.rules.passRestriction && (r.passedPlayers || []).includes(p.id);
+        return `<div class="pcard ${r.order[r.currentTurnIndex] === p.id ? "turn" : ""}${p.finished ? " done" : ""}${passed ? " passed" : ""}">
         <div class="pname">${esc(p.name)}${p.isCPU ? '<span class="tag-cpu">CPU</span>' : ""}${p.isDummy ? '<span class="tag-dummy">手動</span>' : ""}</div>
-        <div class="t-dim text-xs">${p.finished ? "あがり" : `残${p.handCount}枚`}</div>
-      </div>`).join("")}</div>
+        ${cls ? `<div class="pcls" title="前回のゲームでの階級"><span class="px-1.5 rounded-full text-[10px] font-bold ${badgeColor(cls)}">${cls}</span></div>` : ""}
+        ${p.finished ? `<div class="pdone">${p.finishOrder}位 あがり</div>`
+          : `<div class="t-dim text-xs">残${p.handCount}枚${passed ? "・パス" : ""}</div>`}
+      </div>`;
+      }).join("")}</div>
       <div class="field ${rev ? "rev" : ""}">${fieldDisplay(r)}</div>
       <div class="logline">${esc(r.log[r.log.length - 1] || "")}</div>
       <div class="turnline ${canAct ? "t-accent" : "t-dim"}">
-        ${isTest ? `操作中：${esc(act.name)}${act.isCPU ? "（CPU思考中…）" : ""}` : canAct ? "あなたの番です" : `${esc((r.players.find((p) => p.id === r.order[r.currentTurnIndex]) || {}).name || "")} の番`}
+        ${isTest ? `操作中：${esc(act.name)}${act.isCPU ? "（CPU思考中…）" : ""}` : me.finished ? `あなたは ${me.finishOrder}位であがり！` : canAct ? "あなたの番です" : `${esc((r.players.find((p) => p.id === r.order[r.currentTurnIndex]) || {}).name || "")} の番`}
       </div>
       <div class="panel p-3 panel-bottom">
         ${popFloat}

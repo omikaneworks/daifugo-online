@@ -938,6 +938,8 @@ export class DaifugoRoom {
         fx.push({ label: "反則上がり", kind: "foul" });
       } else {
         me.finishOrder = r.players.filter((p) => p.finished && !p.foul).length;
+        r.log.push(`${me.name} が ${me.finishOrder}位で上がり！`);
+        fx.push({ label: "あがり！", kind: "agari" }, { label: `${me.finishOrder}位`, kind: "agari" });
       }
       if (rules.agariNagashi) cut = true;
     }
@@ -959,7 +961,9 @@ export class DaifugoRoom {
       else r.field = { kind: "joker", count: play.count, cards };
       r.lastPlayerId = playerId;
       r.passStreak = 0;
-      r.passedPlayers = [];
+      // **passedPlayers はここで消さない。** パス制限は「場が流れるまで出せない」なので、
+      // 誰かが出しただけで消すと、パスした人に場が生きたまま手番が戻ってしまう
+      // （消えるのは clearField() を通るときだけ）
       this.updateLocks(r, play, reals);
     }
     if (cut) r.lastPlayerId = playerId;
@@ -1055,7 +1059,8 @@ export class DaifugoRoom {
         if (p.hand.length === 0) {
           p.finished = true;
           p.finishOrder = r.players.filter((q) => q.finished && !q.foul).length;
-          r.log.push(`${p.name} は手札が無くなり上がり（Qボンバー）`);
+          r.log.push(`${p.name} が ${p.finishOrder}位で上がり！（Qボンバー）`);
+          this.setFlash([{ label: "あがり！", kind: "agari" }, { label: `${p.finishOrder}位`, kind: "agari" }], p.name);
         }
       }
       r.log.push(`${me.name} が ${RANK_LABEL(rank)} を宣言し、${n}枚が捨てられた（Qボンバー）`);
@@ -1077,6 +1082,8 @@ export class DaifugoRoom {
         this.setFlash([{ label: "反則上がり", kind: "foul" }], me.name);
       } else {
         me.finishOrder = r.players.filter((p) => p.finished && !p.foul).length;
+        r.log.push(`${me.name} が ${me.finishOrder}位で上がり！`);
+        this.setFlash([{ label: "あがり！", kind: "agari" }, { label: `${me.finishOrder}位`, kind: "agari" }], me.name);
       }
       r.adv.justFinished = true;
     }
@@ -1108,6 +1115,32 @@ export class DaifugoRoom {
     return fromIndex;
   }
 
+  // 場を流して、次の親を決める（出した本人が残っていれば本人、上がっていれば次の人）
+  clearAndLead() {
+    const r = this.room;
+    const lastIdx = r.order.indexOf(r.lastPlayerId);
+    this.clearField(r);
+    r.log.push("場が流れました");
+    const last = r.players.find((p) => p.id === r.lastPlayerId);
+    if (last && !last.finished) r.currentTurnIndex = lastIdx;
+    else r.currentTurnIndex = this.findNext(lastIdx, 0);
+  }
+
+  // 場が「もう誰にも取れない」状態なら流す。手番を進めたあとに必ず通す。
+  // パスの数え上げ（applyPass）だけでは足りない経路が2つあるため：
+  //  ① 5スキップ・9リバース等で、手番が場の持ち主に一周して戻ってくる
+  //     （これが無いと自分の出した札に自分でパスでき、パス済みのまま手番が回り続ける）
+  //  ② 場に出した人が上がって抜け、残りが全員パス済みになる
+  //     （誰も打てないのに手番だけが回り、パスした人に順番が戻ってしまう）
+  settleField() {
+    const r = this.room;
+    if (!r.field) return;
+    const restrict = !!r.rules.passRestriction;
+    const canAct = r.players.filter((p) => !p.finished && p.id !== r.lastPlayerId
+      && !(restrict && r.passedPlayers.includes(p.id)));
+    if (r.order[r.currentTurnIndex] === r.lastPlayerId || canAct.length === 0) this.clearAndLead();
+  }
+
   advanceTurn() {
     const r = this.room;
     const adv = r.adv || { cut: false, justFinished: false, skip: 0 };
@@ -1124,6 +1157,7 @@ export class DaifugoRoom {
     } else {
       r.currentTurnIndex = this.findNext(r.currentTurnIndex, adv.skip);
     }
+    this.settleField();
   }
 
   applyPass(playerId) {
@@ -1140,19 +1174,19 @@ export class DaifugoRoom {
 
     const active = r.players.filter((p) => !p.finished);
     const passedActive = active.filter((p) => r.passedPlayers.includes(p.id)).length;
+    // 場に札を出した本人を除いた「まだ打てる人」が全員パスしたら流す。
+    // **本人が上がって抜けている場合は誰も除かない**（active.length - 1 と決め打ちすると、
+    // 上がった人の札に対して最後の1人が打つ前に流れてしまう）
+    const others = active.filter((p) => p.id !== r.lastPlayerId).length;
     const shouldClear = r.rules.passRestriction
-      ? passedActive >= active.length - 1
-      : r.passStreak >= active.length - 1;
+      ? passedActive >= others
+      : r.passStreak >= others;
 
     if (shouldClear) {
-      const lastIdx = r.order.indexOf(r.lastPlayerId);
-      this.clearField(r);
-      r.log.push("場が流れました");
-      const last = r.players.find((p) => p.id === r.lastPlayerId);
-      if (last && !last.finished) r.currentTurnIndex = lastIdx;
-      else r.currentTurnIndex = this.findNext(lastIdx, 0);
+      this.clearAndLead();
     } else {
       r.currentTurnIndex = this.findNext(r.currentTurnIndex, 0);
+      this.settleField();
     }
     return { ok: true };
   }
