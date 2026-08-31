@@ -60,11 +60,11 @@ button:disabled{opacity:.3}
 .btn-sub{background:var(--panel2);color:var(--text);border:1px solid var(--border)}
 
 /* カード */
-.card{width:56px;height:80px;flex:0 0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;
+.card{width:64px;height:92px;flex:0 0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;
   border-radius:8px;border:2px solid;box-shadow:0 1px 3px rgba(0,0,0,.18);transition:transform .12s}
 .card.small{width:40px;height:56px}
 .card-normal{background:var(--card);border-color:var(--card-b)}
-.card-sel{background:var(--sel);border-color:var(--sel-b);transform:translateY(-12px)}
+.card-sel{background:var(--sel);border-color:var(--sel-b);transform:translateY(-14px)}
 .card-joker{background:var(--jk);border-color:var(--jk-b)}
 /* いま出せる札／出せない札の色分け。app.js の handRow() が付ける。
    **差が無い場面（全部出せる・自分の番でない）ではどちらも付かない** ——
@@ -73,12 +73,12 @@ button:disabled{opacity:.3}
 .card-on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .card-off{opacity:.38;filter:grayscale(1);box-shadow:none}
 .card.clickable:active{transform:scale(.94)}
-.cd-rank{font-weight:700;font-size:1.3rem;line-height:1.1}
+.cd-rank{font-weight:700;font-size:1.5rem;line-height:1.1}
 .card.small .cd-rank{font-size:1rem}
-.cd-suit{font-size:1.15rem;line-height:1}
+.cd-suit{font-size:1.3rem;line-height:1}
 .card.small .cd-suit{font-size:.9rem}
 .c-red{color:var(--red)} .c-black{color:var(--black)} .c-joker{color:var(--jk-t)}
-.jk-face{font-size:24px;line-height:1}
+.jk-face{font-size:28px;line-height:1}
 .card.small .jk-face{font-size:17px}
 .jk-txt{font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--jk-t);margin-top:2px}
 .card.small .jk-txt{font-size:8px}
@@ -90,9 +90,9 @@ button:disabled{opacity:.3}
 .hand-row .card{position:relative;align-items:flex-start;justify-content:center;padding-left:3px;
   margin-right:var(--hand-m,4px)}
 .hand-row .card:last-child{margin-right:0}
-.hand-row .cd-rank{font-size:var(--hand-fs,17.6px)}
-.hand-row .cd-suit{font-size:calc(var(--hand-fs,17.6px) * .88)}
-.hand-row .jk-face{font-size:calc(var(--hand-fs,17.6px) * 1.2)}
+.hand-row .cd-rank{font-size:var(--hand-fs,20px)}
+.hand-row .cd-suit{font-size:calc(var(--hand-fs,20px) * .88)}
+.hand-row .jk-face{font-size:calc(var(--hand-fs,20px) * 1.2)}
 .hand-row .jk-txt{display:none}
 
 /* ゲーム画面 */
@@ -127,18 +127,28 @@ button:disabled{opacity:.3}
 .field.rev{background:var(--field-rev);border-color:var(--field-rev-b)}
 .field.rev .field-empty{color:var(--field-rev-t)}
 /* 場のカードは手札より大きく見せる（fieldDisplay は small で描画している） */
-.field .card.small{width:62px;height:89px;border-radius:9px;box-shadow:0 3px 8px rgba(0,0,0,.28)}
-.field .card.small .cd-rank{font-size:2.2rem}
-.field .card.small .cd-suit{font-size:1.7rem}
-.field .card.small .jk-face{font-size:39px}
-.field .card.small .jk-txt{font-size:11px}
+/* **幅が狭い端末では自動で小さくなるように vw で頭打ちにする。**
+   固定px だけにすると、小さいスマホで3〜4枚の一手が2段に折り返す（375px幅で上限に届く） */
+.field .card.small{width:min(78px,20.8vw);height:auto;aspect-ratio:78/112;
+  border-radius:11px;box-shadow:0 3px 8px rgba(0,0,0,.28)}
+.field .card.small .cd-rank{font-size:min(2.8rem,11.9vw)}
+.field .card.small .cd-suit{font-size:min(2.15rem,9.2vw)}
+.field .card.small .jk-face{font-size:min(49px,13vw)}
+.field .card.small .jk-txt{font-size:13px}
+/* 5枚以上出た一手（階段・革命）は、折り返さないよう一回り小さくする
+   （app.js の fieldDisplay が many を付ける）。1〜4枚＝ほとんどの一手は大きいまま */
+.field .pile-g.many .card.small{width:min(55px,14.6vw);aspect-ratio:78/112;border-radius:9px}
+.field .pile-g.many .card.small .cd-rank{font-size:min(1.9rem,8.1vw)}
+.field .pile-g.many .card.small .cd-suit{font-size:min(1.5rem,6.4vw)}
+.field .pile-g.many .card.small .jk-face{font-size:min(36px,9.6vw)}
+.field .pile-g.many .card.small .jk-txt{font-size:10px}
 /* 直近に出た数手を横に並べる。今の場だけ大きく、それ以前は小さく薄く。 */
 .pile{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;width:100%}
 .pile-g{display:flex;gap:3px;flex-wrap:wrap;justify-content:center}
-.field .pile-g.old .card.small{width:38px;height:54px;border-radius:7px;opacity:.55;box-shadow:none;border-width:1px}
-.field .pile-g.old .card.small .cd-rank{font-size:1.25rem}
-.field .pile-g.old .card.small .cd-suit{font-size:1rem}
-.field .pile-g.old .card.small .jk-face{font-size:22px}
+.field .pile-g.old .card.small{width:46px;height:66px;border-radius:8px;opacity:.55;box-shadow:none;border-width:1px}
+.field .pile-g.old .card.small .cd-rank{font-size:1.5rem}
+.field .pile-g.old .card.small .cd-suit{font-size:1.2rem}
+.field .pile-g.old .card.small .jk-face{font-size:27px}
 .field .pile-g.old .card.small .jk-txt{font-size:7px}
 .logline{padding:0 16px;font-size:.82rem;color:var(--dim);height:21px;text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 

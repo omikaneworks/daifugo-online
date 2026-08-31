@@ -562,7 +562,7 @@ function handRow(hand, off) {
 }
 // 重なり量と文字サイズは、描画後の実際の幅から決める。
 // 枚数が多いほど詰まり、左端に残る帯（＝見える幅）に収まるところまで数字を縮める。
-const CARD_W = 56;
+const CARD_W = 64;   // .card の幅（public/index.html）。**CSSを変えたらここも変える**
 function layoutHand() {
   for (const row of document.querySelectorAll(".hand-row")) {
     const n = row.children.length;
@@ -570,7 +570,7 @@ function layoutHand() {
     const w = row.clientWidth - 1; // 端数で横スクロールが出ないよう1px余らせる
     const strip = n > 1 ? Math.min(CARD_W + 4, (w - CARD_W) / (n - 1)) : CARD_W;
     // 「10」が帯に収まる大きさ。1.2 は太字2桁のおおよその幅（em）
-    const fs = Math.max(10, Math.min(17.6, (strip - 3) / 1.2));
+    const fs = Math.max(10, Math.min(20, (strip - 3) / 1.2));
     row.style.setProperty("--hand-m", (strip - CARD_W).toFixed(2) + "px");
     row.style.setProperty("--hand-fs", fs.toFixed(1) + "px");
   }
@@ -583,7 +583,10 @@ function fieldDisplay(r) {
   const pile = r.pile || [];
   if (!pile.length) return `<p class="field-empty">場は空です（自由に出せます）</p>`;
   const lastIdx = pile.length - 1;
-  return `<div class="pile">${pile.map((g, i) => `<div class="pile-g ${i === lastIdx ? "now" : "old"}">${
+  // 5枚以上の一手（階段・革命）は、大きいままだとスマホの幅で2段に折り返す。
+  // そのぶんだけカードを縮める（1〜4枚＝ほとんどの一手は大きいまま）
+  return `<div class="pile">${pile.map((g, i) => `<div class="pile-g ${i === lastIdx ? "now" : "old"}${
+    g.cards.length >= 5 ? " many" : ""}">${
     g.cards.map((c) => cardFace(c, false, false, true)).join("")}</div>`).join("")}</div>`;
 }
 function rulesSummary(rules) {
