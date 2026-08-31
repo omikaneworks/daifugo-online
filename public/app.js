@@ -1161,19 +1161,20 @@ function paint() {
       </div>
       <div class="players">${others.map((p) => {
         // 前回の階級（r.classes）・パス済み（場が流れるまで打てない）・あがった順位を1枚に収める
-        const cls = (r.classes && r.classes[p.id]) || "";
+        // 上がった人は今の局の階級を出すので、前回のバッジは引っ込める（2つ並ぶと読めない）
+        const cls = (!p.finished && r.classes && r.classes[p.id]) || "";
         const passed = !p.finished && r.field && r.rules.passRestriction && (r.passedPlayers || []).includes(p.id);
         return `<div class="pcard ${r.order[r.currentTurnIndex] === p.id ? "turn" : ""}${p.finished ? " done" : ""}${passed ? " passed" : ""}">
         <div class="pname">${esc(p.name)}${p.isCPU ? '<span class="tag-cpu">CPU</span>' : ""}${p.isDummy ? '<span class="tag-dummy">手動</span>' : ""}</div>
         ${cls ? `<div class="pcls" title="前回のゲームでの階級"><span class="px-1.5 rounded-full text-[10px] font-bold ${badgeColor(cls)}">${cls}</span></div>` : ""}
-        ${p.finished ? `<div class="pdone">${p.finishOrder}位 あがり</div>`
+        ${p.finished ? `<div class="pdone">${esc(p.finishTitle || `${p.finishOrder}位`)}</div>`
           : `<div class="t-dim text-xs">残${p.handCount}枚${passed ? '<span class="ppass">パス</span>' : ""}</div>`}
       </div>`;
       }).join("")}</div>
       <div class="field ${rev ? "rev" : ""}">${fieldDisplay(r)}</div>
       <div class="logline">${esc(r.log[r.log.length - 1] || "")}</div>
       <div class="turnline ${canAct ? "t-accent" : "t-dim"}">
-        ${isTest ? `操作中：${esc(act.name)}${act.isCPU ? "（CPU思考中…）" : ""}` : me.finished ? `あなたは ${me.finishOrder}位であがり！` : canAct ? "あなたの番です" : `${esc((r.players.find((p) => p.id === r.order[r.currentTurnIndex]) || {}).name || "")} の番`}
+        ${isTest ? `操作中：${esc(act.name)}${act.isCPU ? "（CPU思考中…）" : ""}` : me.finished ? `あなたは ${esc(me.finishTitle || `${me.finishOrder}位`)}であがり！` : canAct ? "あなたの番です" : `${esc((r.players.find((p) => p.id === r.order[r.currentTurnIndex]) || {}).name || "")} の番`}
       </div>
       <div class="panel p-3 panel-bottom">
         ${popFloat}

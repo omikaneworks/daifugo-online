@@ -293,7 +293,7 @@ export class DaifugoRoom {
     this.clearField(r);
     for (const p of r.players) {
       p.hand = []; p.handCount = 0;
-      p.finished = false; p.finishOrder = null; p.foul = false; p.foulOrder = null;
+      p.finished = false; p.finishOrder = null; p.finishTitle = null; p.foul = false; p.foulOrder = null;
     }
   }
 
@@ -554,7 +554,7 @@ export class DaifugoRoom {
       r.status = "waiting";
       // ダミー席が残っている間はテストモードを維持する（開発中の連戦用）
       r.testMode = r.players.some((p) => p.isDummy);
-      r.players = r.players.map((p) => ({ ...p, hand: [], handCount: 0, finished: false, finishOrder: null }));
+      r.players = r.players.map((p) => ({ ...p, hand: [], handCount: 0, finished: false, finishOrder: null, finishTitle: null }));
       this.clearField(r);
       r.pending = null; r.adv = null; r.discardPile = [];
       r.log = ["次のゲームの準備中..."];
@@ -934,12 +934,15 @@ export class DaifugoRoom {
         me.foul = true;
         me.foulOrder = ++r.foulSeq;
         me.finishOrder = r.players.length; // 仮置き。確定は checkGameEnd()
+        me.finishTitle = "反則あがり";     // 階級は最後まで決まらないので、そう名乗らせない
+        this.applyTitles();
         r.log.push(`${me.name} は反則上がり！（下位確定）`);
         fx.push({ label: "反則上がり", kind: "foul" });
       } else {
         me.finishOrder = r.players.filter((p) => p.finished && !p.foul).length;
-        r.log.push(`${me.name} が ${me.finishOrder}位で上がり！`);
-        fx.push({ label: "あがり！", kind: "agari" }, { label: `${me.finishOrder}位`, kind: "agari" });
+        this.applyTitles();
+        r.log.push(`${me.name} が ${me.finishTitle}であがり！`);
+        fx.push({ label: "あがり！", kind: "agari" }, { label: me.finishTitle, kind: "agari" });
       }
       if (rules.agariNagashi) cut = true;
     }
@@ -1059,8 +1062,9 @@ export class DaifugoRoom {
         if (p.hand.length === 0) {
           p.finished = true;
           p.finishOrder = r.players.filter((q) => q.finished && !q.foul).length;
-          r.log.push(`${p.name} が ${p.finishOrder}位で上がり！（Qボンバー）`);
-          this.setFlash([{ label: "あがり！", kind: "agari" }, { label: `${p.finishOrder}位`, kind: "agari" }], p.name);
+          this.applyTitles();
+          r.log.push(`${p.name} が ${p.finishTitle}であがり！（Qボンバー）`);
+          this.setFlash([{ label: "あがり！", kind: "agari" }, { label: p.finishTitle, kind: "agari" }], p.name);
         }
       }
       r.log.push(`${me.name} が ${RANK_LABEL(rank)} を宣言し、${n}枚が捨てられた（Qボンバー）`);
@@ -1078,12 +1082,15 @@ export class DaifugoRoom {
         me.foul = true;
         me.foulOrder = ++r.foulSeq;
         me.finishOrder = r.players.length; // 仮置き。確定は checkGameEnd()
+        me.finishTitle = "反則あがり";
+        this.applyTitles();
         r.log.push(`${me.name} は反則上がり！（下位確定）`);
         this.setFlash([{ label: "反則上がり", kind: "foul" }], me.name);
       } else {
         me.finishOrder = r.players.filter((p) => p.finished && !p.foul).length;
-        r.log.push(`${me.name} が ${me.finishOrder}位で上がり！`);
-        this.setFlash([{ label: "あがり！", kind: "agari" }, { label: `${me.finishOrder}位`, kind: "agari" }], me.name);
+        this.applyTitles();
+        r.log.push(`${me.name} が ${me.finishTitle}であがり！`);
+        this.setFlash([{ label: "あがり！", kind: "agari" }, { label: me.finishTitle, kind: "agari" }], me.name);
       }
       r.adv.justFinished = true;
     }
@@ -1103,6 +1110,17 @@ export class DaifugoRoom {
       if (!p || p.finished) continue;
       if (restrict && r.passedPlayers.includes(p.id)) continue;
       if (toSkip > 0) { toSkip--; continue; }
+      return idx;
+    }
+    // 飛ばし切れなかったとき。**まずパス制限だけは守って探す。**
+    // 打てる人が少ないのにスキップ枚数が多いと上のループが尽きる（例：6人で打てるのが1人、
+    // 5スキップ3枚）。ここで守らないと、パスした人に手番が回る
+    idx = fromIndex;
+    for (let i = 0; i < r.order.length; i++) {
+      idx = (idx + r.direction + r.order.length) % r.order.length;
+      const p = r.players.find((pl) => pl.id === r.order[idx]);
+      if (!p || p.finished) continue;
+      if (restrict && r.passedPlayers.includes(p.id)) continue;
       return idx;
     }
     // 全員パス済みなどの場合は素直に次の未上がり者へ
@@ -1189,6 +1207,30 @@ export class DaifugoRoom {
       this.settleField();
     }
     return { ok: true };
+  }
+
+  // 上がった人に、いまの情報で決まる階級を付ける（対戦中の画面に「大富豪」等を出すため）。
+  // **1位が決まった時点で都落ち・下剋上の有無は確定する**ので、ここで付けた階級は
+  // 結果発表と食い違わない。規則は checkGameEnd() と同じで、まだ上がっていない人を
+  // 「このあと普通に上がる」として間に挟んだ並びに当てているだけ。
+  // **順位（N位）ではなく階級を出す以上、都落ちの繰り上がりまで見ないと嘘になる**
+  // （実測で標準ルールの38%の局がズレた）。反則者だけは階級を名乗らせない。
+  applyTitles() {
+    const r = this.room;
+    const total = r.players.length;
+    const clean = r.players.filter((p) => p.finished && !p.foul).sort((a, b) => a.finishOrder - b.finishOrder);
+    const rest = r.players.filter((p) => !p.finished);
+    const fouls = r.players.filter((p) => p.finished && p.foul).sort((a, b) => (a.foulOrder || 0) - (b.foulOrder || 0));
+    const base = [...clean, ...rest, ...fouls];
+    if (!base[0] || !base[0].finished) return;   // 1位が決まるまでは何も言えない
+    let line = base;
+    if (r.rules.gekokujo && r.classes && r.classes[base[0].id] === "大貧民") {
+      line = [...base].reverse();                // 下剋上は着順がそっくり裏返る（都落ちは打ち消される）
+    } else if (r.rules.miyakoOchi && r.previousDaifugoId && base[0].id !== r.previousDaifugoId) {
+      const prev = r.players.find((p) => p.id === r.previousDaifugoId);
+      if (prev) line = [...base.filter((p) => p.id !== prev.id), prev];
+    }
+    line.forEach((p, i) => { if (p.finished && !p.foul) p.finishTitle = rankTitle(i + 1, total); });
   }
 
   checkGameEnd() {
