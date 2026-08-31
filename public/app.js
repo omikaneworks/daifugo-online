@@ -536,15 +536,17 @@ const roomLabel = (r) => (r && r.code) || "";
 function nightBtn() {
   return `<button onclick="toggleNight()" class="btn-sub px-3 py-1 rounded-lg text-sm">${state.night ? "☀︎" : "☾"}</button>`;
 }
-// tone は "on"（いま出せる＝目立たせる）／"off"（いまは出せない＝薄いグレー）／""（区別なし）
-function cardFace(card, selected, clickable, small, tone) {
+// tone は "on"（いま出せる＝目立たせる）／"off"（いまは出せない＝薄いグレー）／""（区別なし）。
+// style は場に置いた札の傾き（--tilt / --dx / --dy）を載せるためだけに使う
+function cardFace(card, selected, clickable, small, tone, style) {
   const isJoker = card.suit === "JOKER";
   const cls = `card ${small ? "small" : ""} ${isJoker ? "card-joker" : ""} ${selected ? "card-sel" : "card-normal"} ${clickable ? "clickable" : ""} ${tone ? "card-" + tone : ""}`;
   const oc = clickable ? `onclick="toggleSelect('${encodeURIComponent(JSON.stringify(card))}')"` : "";
+  const st = style ? ` style="${style}"` : "";
   if (isJoker) {
-    return `<button ${oc} class="${cls}"><span class="jk-face">🃏</span><span class="jk-txt">JOKER</span></button>`;
+    return `<button ${oc}${st} class="${cls}"><span class="jk-face">🃏</span><span class="jk-txt">JOKER</span></button>`;
   }
-  return `<button ${oc} class="${cls}">
+  return `<button ${oc}${st} class="${cls}">
     <span class="cd-rank ${SUIT_COLOR[card.suit]}">${RANK_LABEL(card.rank)}</span>
     <span class="cd-suit ${SUIT_COLOR[card.suit]}">${SUIT_SYMBOL[card.suit]}</span></button>`;
 }
@@ -584,7 +586,7 @@ function layoutPile() {
   const pile = document.querySelector(".pile");
   if (!field || !pile) return;
   pile.style.transform = "";                       // 等倍に戻してから測る
-  const avail = field.clientHeight - 12;           // 上下の余白ぶん
+  const avail = field.clientHeight - 20;           // 上下の余白ぶん（傾けた角が出る分も見込む）
   const need = pile.scrollHeight;
   if (!avail || !need) return;
   const k = need > avail ? Math.max(0.5, avail / need) : 1;
@@ -595,6 +597,26 @@ window.addEventListener("resize", () => { layoutHand(); layoutPile(); });
 // 場は、いま場が流れずに続いている間に出た手をまとめて見せる（room.pile）。
 // 最後の1手だけ大きく、それより前の手は小さく薄く左に並べる。
 // 場が流れると pile はサーバー側で空になるので、ここも自動的に「場は空です」に戻る。
+// 場に出した札は「机に放った」ように少しずつ傾ける。**Math.random() を使わないこと。**
+// paint() は状態が届くたびに画面を作り直すので、乱数だと同じ札が毎回違う角度になって
+// カタカタ動く。カードidから決めれば、同じ札はいつでも同じ角度に落ち着く。
+// 古い手ほど大きく傾ける（今の場は読みやすさを優先して控えめに）
+// **よく混ざるハッシュを使うこと。** id は "H-5" "H-6" のように1文字違いなので、
+// 素朴な h*31+c だと隣り合う札がほぼ同じ角度になり、傾けた意味が無くなる（実際そうなった）
+function tossHash(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  h ^= h >>> 13; h = Math.imul(h, 0x5bd1e995); h ^= h >>> 15;
+  return (h >>> 0) / 4294967296;                         // 0〜1
+}
+function tossStyle(card, depth) {
+  const id = String(card.id);
+  const spread = 7 + depth * 5;                          // 今の手 ±7度 → 3手前 ±22度
+  const rot = (tossHash(id + "r") * 2 - 1) * spread;
+  const dx = (tossHash(id + "x") - 0.5) * 20;            // 左右に散らす（きれいに1列に並べない）
+  const dy = (tossHash(id + "y") - 0.5) * 8;
+  return `--tilt:${rot.toFixed(1)}deg;--dx:${dx.toFixed(1)}px;--dy:${dy.toFixed(1)}px`;
+}
 function fieldDisplay(r) {
   const pile = r.pile || [];
   if (!pile.length) return `<p class="field-empty">場は空です（自由に出せます）</p>`;
@@ -603,7 +625,7 @@ function fieldDisplay(r) {
   // 一番下が今の場になる
   return `<div class="pile">${pile.map((g, i) => `<div class="pile-g ${
     i === lastIdx ? "now" : `old d${lastIdx - i}`}">${
-    g.cards.map((c) => cardFace(c, false, false, true)).join("")}</div>`).join("")}</div>`;
+    g.cards.map((c) => cardFace(c, false, false, true, "", tossStyle(c, lastIdx - i))).join("")}</div>`).join("")}</div>`;
 }
 function rulesSummary(rules) {
   let n = 0;

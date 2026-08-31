@@ -136,8 +136,14 @@ button:disabled{opacity:.3}
 /* 直近の数手を**縦に積む**（下ほど新しい＝一番下が今の場）。今の一手だけ大きく、
    それ以前は小さく薄くしたうえで**カードを重ねて幅を詰める**（手札と同じ考え方で、
    左端の数字だけ見えればよい）。横に並べると3手前まで出したときスマホの幅に収まらない。 */
-.pile{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:100%}
+.pile{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;width:100%}
 .pile-g{display:flex;gap:3px;flex-wrap:wrap;justify-content:center}
+/* 手と手も少し重ねる（放った札が積み上がっているように見せる）。
+   古い札は中身を左上に寄せてあるので、重なっても数字は隠れない */
+.pile-g.old{margin-bottom:-20px}
+/* 机に放ったような傾き。角度はカードidから決まる（app.js の tossStyle）ので、
+   画面を描き直しても同じ札は同じ角度のまま動かない */
+.field .pile-g .card.small{transform:translate(var(--dx,0),var(--dy,0)) rotate(var(--tilt,0deg))}
 .field .pile-g.old{gap:0}
 .field .pile-g.old .card.small{position:relative;width:42px;height:60px;border-radius:7px;
   box-shadow:none;border-width:1px;margin-right:-16px;align-items:flex-start;padding-left:3px}
