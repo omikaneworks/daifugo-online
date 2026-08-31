@@ -611,25 +611,26 @@ function tossHash(s) {
 }
 function tossStyle(card, depth) {
   const id = String(card.id);
-  const spread = 7 + depth * 5;                          // 今の手 ±7度 → 3手前 ±22度
+  // 傾けすぎると角の表記まで隠れる。古い手ほど少しだけ大きく振る程度にする
+  const spread = 6 + depth * 2;                          // 今の手 ±6度 → 3手前 ±12度
   const rot = (tossHash(id + "r") * 2 - 1) * spread;
   // 1手の中は散らしすぎない（重なって数字が隠れる）。散らばりは手ごとの groupToss に任せる
   const dx = (tossHash(id + "x") - 0.5) * 11;
   const dy = (tossHash(id + "y") - 0.5) * 6;
   return `--tilt:${rot.toFixed(1)}deg;--dx:${dx.toFixed(1)}px;--dy:${dy.toFixed(1)}px`;
 }
-// 1手を置く場所。今の手は真ん中、古い手ほど中心から離す（同じ所に落とすと下の手が
-// 完全に隠れて「何手前まで残っている」ことが見えなくなる）。向きは手の先頭の札から
-// 決めるので、局ごとに散らばり方が変わりつつ、描き直しても動かない
-function groupToss(cards, depth) {
-  if (!depth) return "--gx:0px;--gy:0px";
+// 1手を置く場所。**古いほど左上へずらす**（新しい手は右下に重なる）。
+// 方角をランダムにすると、たまたま重なった手が丸ごと隠れて何を出したか読めなくなる。
+// 一定の向きにずらしておけば、古い手も左上の角（＝数字と絵柄）が必ず残る。
+// 放った感じは、ずらし幅の小さなブレと札ごとの傾きで出す。
+// 山全体が中心に来るよう、手の数に応じて折り返す
+const TOSS_STEP_X = 30, TOSS_STEP_Y = 24;   // 角の表記（数字＋マーク）が必ず出る幅
+function groupToss(cards, depth, count) {
   const seed = String((cards[0] || {}).id || depth);
-  // **向きは完全な乱数にしない。** たまたま近い方向へ2手が重なると、下の手が丸ごと
-  // 隠れて「何手前まで残っているか」が見えなくなる。黄金角ずつ回した上に少しだけ
-  // ばらけさせる（散らばって見えるが、必ず別の方角へ行く）
-  const ang = depth * 2.39996 + (tossHash(seed + "g") - 0.5) * 1.1;
-  const rad = depth * 25;
-  return `--gx:${(Math.cos(ang) * rad).toFixed(1)}px;--gy:${(Math.sin(ang) * rad * 0.8).toFixed(1)}px`;
+  const mid = (count - 1) / 2;
+  const gx = (mid - depth) * TOSS_STEP_X + (tossHash(seed + "gx") - 0.5) * 9;
+  const gy = (mid - depth) * TOSS_STEP_Y + (tossHash(seed + "gy") - 0.5) * 9;
+  return `--gx:${gx.toFixed(1)}px;--gy:${gy.toFixed(1)}px`;
 }
 function fieldDisplay(r) {
   const pile = r.pile || [];
@@ -638,7 +639,7 @@ function fieldDisplay(r) {
   // 何手前かを d1〜d3 で渡す（古いほど薄く・奥に）。並びは古い順なので、最後が今の手
   return `<div class="pile">${pile.map((g, i) => {
     const depth = lastIdx - i;
-    return `<div class="pile-g ${depth ? `old d${depth}` : "now"}" style="${groupToss(g.cards, depth)}">${
+    return `<div class="pile-g ${depth ? `old d${depth}` : "now"}" style="${groupToss(g.cards, depth, pile.length)}">${
       g.cards.map((c) => cardFace(c, false, false, true, "", tossStyle(c, depth))).join("")}</div>`;
   }).join("")}</div>`;
 }
@@ -1221,7 +1222,7 @@ function paint() {
         const cls = (!p.finished && r.classes && r.classes[p.id]) || "";
         const passed = !p.finished && r.field && r.rules.passRestriction && (r.passedPlayers || []).includes(p.id);
         return `<div class="pcard ${r.order[r.currentTurnIndex] === p.id ? "turn" : ""}${p.finished ? " done" : ""}${passed ? " passed" : ""}">
-        <div class="pname">${esc(p.name)}${p.isCPU ? '<span class="tag-cpu">CPU</span>' : ""}${p.isDummy ? '<span class="tag-dummy">手動</span>' : ""}</div>
+        <div class="pname${p.isCPU ? " cpu" : ""}">${esc(p.name)}${p.isDummy ? '<span class="tag-dummy">手動</span>' : ""}</div>
         ${cls ? `<div class="pcls" title="前回のゲームでの階級"><span class="px-1.5 rounded-full text-[10px] font-bold ${badgeColor(cls)}">${cls}</span></div>` : ""}
         ${p.finished ? `<div class="pdone">${esc(p.finishTitle || `${p.finishOrder}位`)}</div>`
           : `<div class="t-dim text-xs">残${p.handCount}枚${passed ? '<span class="ppass">パス</span>' : ""}</div>`}

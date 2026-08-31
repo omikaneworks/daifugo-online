@@ -19,6 +19,8 @@
   --pass-bg:#dfe3ea; --pass-t:#39404d; --pass-b:#c2c8d2;
   /* 上がった席。地と文字を入れ替えた濃いグレー（パスの薄いグレーと必ず変える） */
   --done-bg:#4b5563; --done-t:#f3f4f6;
+  /* CPU の名前の色。--cpu-done は上がった席（地が反転する）用 */
+  --cpu:#0e7490; --cpu-done:#7dd3fc;
 }
 body.night{
   --bg:#14161a; --panel:#1e2127; --panel2:#262a31; --border:#363b44;
@@ -31,6 +33,7 @@ body.night{
   --pass-bg:#3a424f; --pass-t:#e3e7ed; --pass-b:#4d5666;
   /* ナイトでは地が暗いので、反転は「明るいグレー地＋暗い文字」になる */
   --done-bg:#aeb4bc; --done-t:#14161a;
+  --cpu:#38bdf8; --cpu-done:#05475e;
 }
 /* ダブルタップで画面が拡大しないようにする。
    - viewport の maximum-scale は iOS Safari が無視する（アクセシビリティのため）
@@ -108,6 +111,10 @@ button:disabled{opacity:.3}
 .pcard.turn{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
 .pname{font-size:.95rem;font-weight:500;color:var(--text)}
 .tag-cpu{font-size:.72rem;color:#0891b2;margin-left:3px}
+/* 対戦画面では「CPU」の札を出さず、**名前そのものを青字**にして人と見分ける
+   （席の幅が狭いので、札を足すより色で分けるほうが読みやすい） */
+.pname.cpu{color:var(--cpu)}
+.pcard.done .pname.cpu{color:var(--cpu-done)}
 .tag-dummy{font-size:.72rem;color:#7c3aed;margin-left:3px}
 /* あがった席・パスした席・前回の階級（誰が抜けたか一目で分かるように）。
    **枠や色数で飾らず、地と文字の色だけで区別する。** 上がり＝グレー反転、
@@ -147,6 +154,17 @@ button:disabled{opacity:.3}
 .field .pile-g .card.small{position:relative;margin-right:-15px;
   transform:translate(var(--dx,0),var(--dy,0)) rotate(var(--tilt,0deg))}
 .field .pile-g .card.small:last-child{margin-right:0}
+/* **古い手は「何を出したか」が読めることを最優先にする。**
+   新しい手が右下に重なるので、中身を左上の角へ寄せておけば必ず数字が残る
+   （実物のトランプの隅の表記と同じ考え方。手札の重ね表示と同じ手）。
+   1手の中はもっと詰めてよい（角の表記さえ出ていれば分かる） */
+.field .pile-g.old .card.small{margin-right:-28px;padding:3px 0 0 5px;
+  align-items:flex-start;justify-content:flex-start}
+.field .pile-g.old .card.small:last-child{margin-right:0}
+.field .pile-g.old .card.small .cd-rank{font-size:1.5rem}
+.field .pile-g.old .card.small .cd-suit{font-size:1.2rem}
+.field .pile-g.old .card.small .jk-face{font-size:23px}
+.field .pile-g.old .card.small .jk-txt{display:none}
 /* 新しい手ほど手前。古い手は**薄くせず、色を抜いて沈める**（opacity を下げると
    緑の地に溶けて何が出ていたか読めなくなる。実機で見て分かった） */
 .pile-g.now{z-index:4}
