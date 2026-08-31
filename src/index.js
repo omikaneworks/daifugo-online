@@ -1259,11 +1259,16 @@ export class DaifugoRoom {
     r.demotedPlayerId = null;
     if (r.rules.miyakoOchi && r.previousDaifugoId) {
       const prev = r.players.find((p) => p.id === r.previousDaifugoId);
-      if (prev && prev.finishOrder !== 1) {
+      // **反則者は都落ちの対象にしない。** 反則は直前で既に最下位へ押し下げてある
+      // （このメソッド冒頭のコメントの優先順位どおり、反則 → 都落ち → 下剋上の順で効く）。
+      // 対象から外さないと「一番下へ回す」の対象が反則者と重なったとき、
+      // 反則者が一番下から押し出されて2番目以降に浮き上がってしまう
+      // （実測：都落ちON・反則者がいる局で、反則者の階級が大貧民のまま変わらなかった）
+      if (prev && !prev.foul && prev.finishOrder !== 1) {
         r.demotedPlayerId = prev.id;
-        const line = [...r.players].sort((x, y) => x.finishOrder - y.finishOrder)
-          .filter((p) => p.id !== prev.id);
-        line.push(prev);
+        const sorted = [...r.players].sort((x, y) => x.finishOrder - y.finishOrder);
+        const line = [...sorted.filter((p) => !p.foul && p.id !== prev.id), prev,
+          ...sorted.filter((p) => p.foul)];
         line.forEach((p, i) => { newClasses[p.id] = rankTitle(i + 1, total); });
         r.log.push(`${prev.name} は都落ち！`);
       }
