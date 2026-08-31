@@ -127,29 +127,27 @@ button:disabled{opacity:.3}
 .field.rev{background:var(--field-rev);border-color:var(--field-rev-b)}
 .field.rev .field-empty{color:var(--field-rev-t)}
 /* 場のカードは手札より大きく見せる（fieldDisplay は small で描画している） */
-/* **幅が狭い端末では自動で小さくなるように vw で頭打ちにする。**
-   固定px だけにすると、小さいスマホで3〜4枚の一手が2段に折り返す（375px幅で上限に届く） */
-.field .card.small{width:min(78px,20.8vw);height:auto;aspect-ratio:78/112;
-  border-radius:11px;box-shadow:0 3px 8px rgba(0,0,0,.28)}
-.field .card.small .cd-rank{font-size:min(2.8rem,11.9vw)}
-.field .card.small .cd-suit{font-size:min(2.15rem,9.2vw)}
-.field .card.small .jk-face{font-size:min(49px,13vw)}
-.field .card.small .jk-txt{font-size:13px}
-/* 5枚以上出た一手（階段・革命）は、折り返さないよう一回り小さくする
-   （app.js の fieldDisplay が many を付ける）。1〜4枚＝ほとんどの一手は大きいまま */
-.field .pile-g.many .card.small{width:min(55px,14.6vw);aspect-ratio:78/112;border-radius:9px}
-.field .pile-g.many .card.small .cd-rank{font-size:min(1.9rem,8.1vw)}
-.field .pile-g.many .card.small .cd-suit{font-size:min(1.5rem,6.4vw)}
-.field .pile-g.many .card.small .jk-face{font-size:min(36px,9.6vw)}
-.field .pile-g.many .card.small .jk-txt{font-size:10px}
-/* 直近に出た数手を横に並べる。今の場だけ大きく、それ以前は小さく薄く。 */
-.pile{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;width:100%}
+/* 場のカードは手札より大きく見せる（fieldDisplay は small で描画している） */
+.field .card.small{width:62px;height:89px;border-radius:9px;box-shadow:0 3px 8px rgba(0,0,0,.28)}
+.field .card.small .cd-rank{font-size:2.2rem}
+.field .card.small .cd-suit{font-size:1.7rem}
+.field .card.small .jk-face{font-size:39px}
+.field .card.small .jk-txt{font-size:11px}
+/* 直近の数手を**縦に積む**（下ほど新しい＝一番下が今の場）。今の一手だけ大きく、
+   それ以前は小さく薄くしたうえで**カードを重ねて幅を詰める**（手札と同じ考え方で、
+   左端の数字だけ見えればよい）。横に並べると3手前まで出したときスマホの幅に収まらない。 */
+.pile{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:100%}
 .pile-g{display:flex;gap:3px;flex-wrap:wrap;justify-content:center}
-.field .pile-g.old .card.small{width:46px;height:66px;border-radius:8px;opacity:.55;box-shadow:none;border-width:1px}
-.field .pile-g.old .card.small .cd-rank{font-size:1.5rem}
-.field .pile-g.old .card.small .cd-suit{font-size:1.2rem}
-.field .pile-g.old .card.small .jk-face{font-size:27px}
-.field .pile-g.old .card.small .jk-txt{font-size:7px}
+.field .pile-g.old{gap:0}
+.field .pile-g.old .card.small{position:relative;width:42px;height:60px;border-radius:7px;
+  box-shadow:none;border-width:1px;margin-right:-16px;align-items:flex-start;padding-left:3px}
+.field .pile-g.old .card.small:last-child{margin-right:0}
+.field .pile-g.old .card.small .cd-rank{font-size:1.15rem}
+.field .pile-g.old .card.small .cd-suit{font-size:.95rem}
+.field .pile-g.old .card.small .jk-face{font-size:20px}
+.field .pile-g.old .card.small .jk-txt{display:none}
+/* 古い手ほど薄くする（1つ前・2つ前・3つ前。fieldDisplay が付ける） */
+.pile-g.d1{opacity:.72} .pile-g.d2{opacity:.52} .pile-g.d3{opacity:.36}
 .logline{padding:0 16px;font-size:.82rem;color:var(--dim);height:21px;text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 
 /* この端末が入った部屋の一覧（スタート画面）。作った部屋の片付けと、

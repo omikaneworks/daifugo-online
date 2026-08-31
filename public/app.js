@@ -575,7 +575,23 @@ function layoutHand() {
     row.style.setProperty("--hand-fs", fs.toFixed(1) + "px");
   }
 }
-window.addEventListener("resize", layoutHand);
+// 積んだ手が場の高さに入り切らないときは、丸ごと縮めて収める。
+// **画面の縦は端末でだいぶ違う**（小さいスマホだと場は240pxほどしかない）ので、
+// カードの大きさを固定にすると3手前まで出したときに緑の外へはみ出す。
+// スクロールさせず、見えなくもせず、入るところまで縮めるのが一番害が小さい
+function layoutPile() {
+  const field = document.querySelector(".field");
+  const pile = document.querySelector(".pile");
+  if (!field || !pile) return;
+  pile.style.transform = "";                       // 等倍に戻してから測る
+  const avail = field.clientHeight - 12;           // 上下の余白ぶん
+  const need = pile.scrollHeight;
+  if (!avail || !need) return;
+  const k = need > avail ? Math.max(0.5, avail / need) : 1;
+  if (k < 1) pile.style.transform = `scale(${k.toFixed(3)})`;
+}
+
+window.addEventListener("resize", () => { layoutHand(); layoutPile(); });
 // 場は、いま場が流れずに続いている間に出た手をまとめて見せる（room.pile）。
 // 最後の1手だけ大きく、それより前の手は小さく薄く左に並べる。
 // 場が流れると pile はサーバー側で空になるので、ここも自動的に「場は空です」に戻る。
@@ -583,10 +599,10 @@ function fieldDisplay(r) {
   const pile = r.pile || [];
   if (!pile.length) return `<p class="field-empty">場は空です（自由に出せます）</p>`;
   const lastIdx = pile.length - 1;
-  // 5枚以上の一手（階段・革命）は、大きいままだとスマホの幅で2段に折り返す。
-  // そのぶんだけカードを縮める（1〜4枚＝ほとんどの一手は大きいまま）
-  return `<div class="pile">${pile.map((g, i) => `<div class="pile-g ${i === lastIdx ? "now" : "old"}${
-    g.cards.length >= 5 ? " many" : ""}">${
+  // 何手前かを d1〜d3 で渡す（古いほど薄くする）。並びは古い順なので、縦に積むと
+  // 一番下が今の場になる
+  return `<div class="pile">${pile.map((g, i) => `<div class="pile-g ${
+    i === lastIdx ? "now" : `old d${lastIdx - i}`}">${
     g.cards.map((c) => cardFace(c, false, false, true)).join("")}</div>`).join("")}</div>`;
 }
 function rulesSummary(rules) {
@@ -828,7 +844,7 @@ function rulesPanel(editable) {
 // ---------- 画面 ----------
 // 描画したあとに手札の重なりを実測で調整する（paint は途中で return するので外側で呼ぶ）
 // rAF でもう一度測るのは、描画直後だと幅がまだ確定していないことがあるため
-function render() { paint(); layoutHand(); requestAnimationFrame(layoutHand); }
+function render() { paint(); layoutHand(); layoutPile(); requestAnimationFrame(() => { layoutHand(); layoutPile(); }); }
 function paint() {
   const app = document.getElementById("app");
 
